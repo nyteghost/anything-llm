@@ -45,7 +45,7 @@ Large attachments may show the existing context-window warning. For archives, ch
 
 ## ZIP limits and formats
 
-64 MiB compressed, 128 MiB total declared expansion, 8 MiB per member, 1000 entries, maximum expansion ratio 250:1, and 4 million parsed text characters. Oversized total text rejects the bundle rather than silently dropping the remainder. Safe text files (including source, configuration and UTF-16/Windows-1252 scripts) are read without execution. PDF, DOCX, XLSX, PPTX, ODT, ODP and EPUB use existing document converters. Office/EPUB container bounds are checked before conversion.
+64 MiB compressed, 128 MiB total declared expansion, 16 MiB per member, 10,000 entries, maximum expansion ratio 250:1, and 64 million parsed text characters. Oversized total text rejects the bundle rather than silently dropping the remainder. Safe text files (including source, configuration and UTF-16/Windows-1252 scripts) are read without execution. PDF, DOCX, XLSX, PPTX, ODT, ODP and EPUB use existing document converters. Office/EPUB container bounds are checked before conversion.
 
 Paths are preserved in the manifest and source boundaries, not written to disk. Symlinks, unsafe/duplicate paths, encrypted members, nested archives, dependency/internal directories, unsupported compression, empty files and binary/media files receive skip reasons. ZIP64 and split-volume archives are rejected. Legacy non-UTF-8 ZIP filenames must be repacked. Native document parsers retain their existing format limitations; scanned PDF interpretation depends on the existing converter settings. Imported source may contain sensitive text: only upload archives you intend the configured model to receive.
 
