@@ -125,28 +125,15 @@ hash.update(process.versions.node);
 console.log(hash.digest('hex'));
 JS
 )"
-if [[ ! -f server/storage/.fork-build.sha256 ]] || [[ "$(cat server/storage/.fork-build.sha256)" != "$FORK_BUILD_KEY" ]] || [[ ! -f server/public/index.html ]] || [[ ! -d server/node_modules ]] || [[ ! -d collector/node_modules ]]; then
+if [[ ! -f server/storage/.fork-build.sha256 ]] || [[ "$(cat server/storage/.fork-build.sha256)" != "$FORK_BUILD_KEY" ]] || [[ ! -f server/public/_index.html ]] || [[ ! -d server/node_modules ]] || [[ ! -d collector/node_modules ]]; then
   for component in server collector frontend; do
     printf 'Installing %s dependencies…\n' "$component"
     (cd "$component" && yarn install --frozen-lockfile --non-interactive --production=false)
   done
   (cd server && yarn prisma generate && yarn prisma migrate deploy)
   (cd frontend && VITE_API_BASE=/api yarn build)
-  # Stage built assets, then move the previous build aside for rollback.
-  node <<'JS'
-const fs = require('fs');
-const staging = 'server/public-fork-staging';
-fs.rmSync(staging, { recursive: true, force: true });
-fs.cpSync('frontend/dist', staging, { recursive: true });
-if (!fs.existsSync(`${staging}/index.html`)) throw new Error('Frontend build did not produce index.html');
-fs.rmSync('server/public-fork-previous', { recursive: true, force: true });
-if (fs.existsSync('server/public')) fs.renameSync('server/public', 'server/public-fork-previous');
-try { fs.renameSync(staging, 'server/public'); }
-catch(error) {
-  if (fs.existsSync('server/public-fork-previous')) fs.renameSync('server/public-fork-previous', 'server/public');
-  throw error;
-}
-JS
+  # The upstream postbuild step renames the SSR template to _index.html.
+  node tools/stage-frontend.cjs
   printf '%s\n' "$FORK_BUILD_KEY" >server/storage/.fork-build.sha256
 fi
 
