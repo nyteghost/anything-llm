@@ -25,12 +25,20 @@ command -v npm >/dev/null || { printf '%s\n' 'Install npm first.' >&2; exit 1; }
 # An explicit, checkout-local toolchain makes selection deterministic.
 if [[ "$(node -p 'process.versions.node.split(".")[0]')" != "24" ]] || ! command -v yarn >/dev/null || [[ "$(yarn --version)" != 1.* ]]; then
   FORK_TOOLCHAIN="$LOCALAI_FORK_ROOT/server/storage/.fork-toolchain"
+  FORK_NODE_ARCH="$(node -p 'process.arch')"
+  case "$FORK_NODE_ARCH" in
+    x64|arm64) ;;
+    *) printf 'Unsupported Linux architecture: %s\n' "$FORK_NODE_ARCH" >&2; exit 1 ;;
+  esac
+  FORK_NODE_PACKAGE="node-linux-$FORK_NODE_ARCH"
   mkdir -p "$FORK_TOOLCHAIN"
-  if [[ ! -x "$FORK_TOOLCHAIN/node_modules/node/bin/node" ]] || [[ ! -f "$FORK_TOOLCHAIN/node_modules/yarn/bin/yarn.js" ]]; then
+  if [[ ! -x "$FORK_TOOLCHAIN/node_modules/$FORK_NODE_PACKAGE/bin/node" ]] || [[ ! -f "$FORK_TOOLCHAIN/node_modules/yarn/bin/yarn.js" ]]; then
     printf '%s\n' 'Installing checkout-local Node 24 and Yarn Classic (one-time setup)…'
-    npm install --prefix "$FORK_TOOLCHAIN" --no-save --package-lock=false node@24 yarn@1.22.22
+    # The architecture-specific package contains the binary itself. Yarn's
+    # preinstall is unnecessary for local use. No lifecycle scripts are needed.
+    npm install --prefix "$FORK_TOOLCHAIN" --no-save --package-lock=false --ignore-scripts "$FORK_NODE_PACKAGE@24.22.3" yarn@1.22.22
   fi
-  export PATH="$FORK_TOOLCHAIN/node_modules/node/bin:$FORK_TOOLCHAIN/node_modules/yarn/bin:$PATH"
+  export PATH="$FORK_TOOLCHAIN/node_modules/$FORK_NODE_PACKAGE/bin:$FORK_TOOLCHAIN/node_modules/yarn/bin:$PATH"
 fi
 if [[ "$(node -p 'process.versions.node.split(".")[0]')" != "24" ]] || ! command -v yarn >/dev/null || [[ "$(yarn --version)" != 1.* ]]; then
   printf '%s\n' 'Could not select Node 24 and Yarn Classic. Setup stopped; no automatic relaunch.' >&2
