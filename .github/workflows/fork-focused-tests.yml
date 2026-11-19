@@ -1,0 +1,45 @@
+name: Fork focused tests
+
+on:
+  push:
+    branches:
+      - feature/archive-source-review
+    paths:
+      - ".github/workflows/fork-focused-tests.yml"
+      - "tests/fork/**"
+      - "tools/linux-run.sh"
+      - "tools/stage-frontend.cjs"
+      - "collector/utils/archives/**"
+      - "collector/utils/files/**"
+      - "server/utils/agents/**"
+  pull_request:
+    paths:
+      - ".github/workflows/fork-focused-tests.yml"
+      - "tests/fork/**"
+      - "tools/linux-run.sh"
+      - "tools/stage-frontend.cjs"
+      - "collector/utils/archives/**"
+      - "collector/utils/files/**"
+      - "server/utils/agents/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  focused-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Validate launcher shell syntax
+        run: bash -n tools/linux-run.sh
+      - name: Run fork regression tests
+        run: node --test tests/fork/*.test.cjs
