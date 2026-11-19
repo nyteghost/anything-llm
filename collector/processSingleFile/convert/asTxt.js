@@ -96,3 +96,6 @@ function decodeWindows1252(buffer) {
 }
 
 module.exports = asTxt;
+
+
+module.exports.decodeText = decodeText;

@@ -1,7 +1,9 @@
 const WATCH_DIRECTORY = require("path").resolve(__dirname, "../hotdir");
 
 const ACCEPTED_MIMES = {
-  "text/plain": [".txt", ".md", ".org", ".adoc", ".rst"],
+  "text/plain": [".txt", ".md", ".org", ".adoc", ".rst", ".bat", ".cmd", ".ps1", ".sh", ".py", ".js", ".ts", ".tsx", ".jsx", ".c", ".cpp", ".h", ".hpp", ".rs", ".go", ".java", ".cs", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".sql", ".log"],
+  "application/zip": [".zip"],
+  "application/x-zip-compressed": [".zip"],
   "text/html": [".html"],
   "text/csv": [".csv"],
   "application/json": [".json"],
@@ -44,6 +46,10 @@ const ACCEPTED_MIMES = {
 };
 
 const SUPPORTED_FILETYPE_CONVERTERS = {
+  ".zip": "./convert/asZip.js",
+  ".bat": "./convert/asTxt.js",
+  ".cmd": "./convert/asTxt.js",
+  ".ps1": "./convert/asTxt.js",
   ".txt": "./convert/asTxt.js",
   ".md": "./convert/asTxt.js",
   ".org": "./convert/asTxt.js",
@@ -92,3 +98,4 @@ module.exports = {
   WATCH_DIRECTORY,
   ACCEPTED_MIMES,
 };
+

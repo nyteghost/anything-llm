@@ -286,9 +286,20 @@ function DnDFileUploader({ workspace, threadSlug, children }) {
               );
               return;
             }
-            // Will always be one file in the array
+            // ZIPs return one manifest-backed bundle, containing every imported member.
             /** @type {ParsedFile} */
             const file = data.files[0];
+            if (!file) throw new Error("Upload returned no parsed document.");
+            let metadata = {};
+            try { metadata = JSON.parse(file.metadata || "{}"); } catch { /* no import manifest */ }
+            if (metadata.archiveManifest) {
+              setFiles(prev => prev.map(item => item.uid === attachment.uid ? {
+                ...item,
+                archiveManifest: metadata.archiveManifest,
+                archiveSummary: metadata.archiveSummary,
+              } : item));
+              showToast(`${attachment.file.name}: ${metadata.archiveSummary.imported} files imported, ${metadata.archiveSummary.skipped} skipped. Open import details before reviewing.`, "info");
+            }
 
             // Add token count for this file
             // and add it to the batch pending files
@@ -580,3 +591,4 @@ async function toBase64(file) {
     reader.readAsDataURL(file);
   });
 }
+

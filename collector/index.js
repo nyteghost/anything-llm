@@ -223,7 +223,7 @@ app.all("*", function (_, response) {
 });
 
 app
-  .listen(COLLECTOR_PORT, async () => {
+  .listen(COLLECTOR_PORT, process.env.COLLECTOR_HOST || undefined, async () => {
     await wipeCollectorStorage();
     console.log(`Document processor app listening on port ${COLLECTOR_PORT}`);
   })
@@ -235,3 +235,4 @@ app
       process.kill(process.pid, "SIGINT");
     });
   });
+

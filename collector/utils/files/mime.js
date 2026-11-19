@@ -32,6 +32,14 @@ class MimeDetector {
     this.lib.define(
       {
         "text/plain": [
+          "bat",
+          "cmd",
+          "ps1",
+          "cpp",
+          "rs",
+          "yaml",
+          "yml",
+          "toml",
           "ts",
           "tsx",
           "py",
@@ -73,3 +81,4 @@ class MimeDetector {
 module.exports = {
   MimeDetector,
 };
+

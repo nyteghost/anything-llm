@@ -1,3 +1,4 @@
+const { attachedFileContext } = require("./aibitat/utils/attachedFileContext");
 const AIbitat = require("./aibitat");
 const AgentPlugins = require("./aibitat/plugins");
 const {
@@ -869,7 +870,7 @@ class AgentHandler {
           allDocuments
             .map((doc, i) => {
               const filename = doc.name || `Document ${i + 1}`;
-              return `<document name="${filename}">\n${doc.content}\n</document>`;
+              return `<document name=${JSON.stringify(filename)}>\n${attachedFileContext(doc)}\n</document>`;
             })
             .join("\n") +
           "\n</attached_documents>"
@@ -1047,3 +1048,4 @@ class AgentHandler {
 }
 
 module.exports.AgentHandler = AgentHandler;
+
