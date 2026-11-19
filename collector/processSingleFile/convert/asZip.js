@@ -11,7 +11,7 @@ const { SUPPORTED_FILETYPE_CONVERTERS } = require("../../utils/constants");
 // source review. Native document converters are reused for these formats only.
 const DOCUMENTS = new Set([".pdf", ".docx", ".xlsx", ".pptx", ".odt", ".odp", ".epub"]);
 const BINARY = new Set([".exe", ".dll", ".so", ".a", ".o", ".class", ".pyc", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".ico", ".mp3", ".mp4", ".wav", ".woff", ".woff2", ".ttf"]);
-const MAX_CHARACTERS = 4_000_000;
+const MAX_CHARACTERS = 64_000_000;
 function decodeSource(bytes) {
   let text;
   if (bytes[0] === 0xff && bytes[1] === 0xfe)
@@ -77,7 +77,7 @@ async function asZip({ fullFilePath, filename, options = {}, metadata = {} }) {
         } else content = decodeSource(bytes);
         if (!content?.trim()) { record.reason = "empty or no readable text"; continue; }
         if (characters + content.length > MAX_CHARACTERS)
-          throw new RangeError("ZIP parsed text exceeds 4,000,000 characters. Split the archive; no partial bundle was accepted.");
+          throw new RangeError("ZIP parsed text exceeds 64,000,000 characters. Split the archive; no partial bundle was accepted.");
         characters += content.length;
         record.status = "imported";
         delete record.reason;
