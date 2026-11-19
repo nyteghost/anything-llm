@@ -1,6 +1,6 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
-const { createTask, transition, ACTIONS, STATES, listAdapters } =
+const { createTask, transition, ACTIONS, STATES, listAdapters, payloadHash } =
   require("../../server/utils/nytedesk/control-plane.cjs");
 
 const now = () => "2026-11-19T12:00:00.000Z";
@@ -11,7 +11,9 @@ const base = {
 };
 const make = (fields = {}) => createTask({ ...base, ...fields }, { now, uuid });
 function change(task, operation, actorId = "reviewer", extra = {}) {
-  return transition(task, { operation, actorId, expectedSequence: task.nextSequence, ...extra }, { now });
+  return transition(task, {
+    operation, actorId, expectedSequence: task.nextSequence, approvedPayloadHash: task.payloadHash, ...extra,
+  }, { now });
 }
 
 test("new tasks are immutable, auditable and gated regardless of action", () => {
@@ -62,6 +64,7 @@ test("stale version and bypass attempts are rejected", () => {
   assert.throws(() => change(task, "succeed", "runner"), /not running/);
   assert.throws(() => transition(task, {
     operation: "approve", actorId: "reviewer", decisionId: "1", expectedSequence: 1,
+    approvedPayloadHash: task.payloadHash,
   }, { now }), /Stale task version/);
 });
 
@@ -78,4 +81,33 @@ test("denied and cancelled tasks cannot be executed or resurrected", () => {
 test("adapter catalog is planning only and carries no live credentials", () => {
   assert.deepEqual(listAdapters().map(a => a.id), ["anthropic", "openai", "ollama", "strata"]);
   assert.ok(listAdapters().every(a => !a.executionEnabled && !a.configured));
+});
+
+test("approval is bound to the exact payload the decider reviewed", () => {
+  const task = make();
+  assert.match(task.payloadHash, /^[0-9a-f]{64}$/);
+  assert.equal(task.payloadHash, payloadHash(task));
+  assert.throws(() => change(task, "approve", "reviewer", { decisionId: "1", approvedPayloadHash: "0".repeat(64) }),
+    /does not match the task payload/);
+  assert.throws(() => change(task, "approve", "reviewer", { decisionId: "1", approvedPayloadHash: undefined }),
+    /does not match the task payload/);
+  const approved = change(task, "approve", "reviewer", { decisionId: "1" });
+  assert.equal(approved.approval.payloadHash, task.payloadHash);
+});
+
+test("a task object whose payload was altered after creation is rejected", () => {
+  const task = structuredClone(make());
+  task.action = ACTIONS.GIT_MERGE;            // swap the reviewed action for another one
+  assert.throws(() => change(task, "approve", "reviewer", { decisionId: "1" }), /recorded hash/);
+  const approved = structuredClone(change(make(), "approve", "reviewer", { decisionId: "1" }));
+  approved.description = "something else";
+  assert.throws(() => change(approved, "start", "runner"), /recorded hash/);
+});
+
+test("audit history is never truncated silently", () => {
+  let task = make();
+  const raw = structuredClone(task);
+  raw.audit = Array.from({ length: 128 }, (_, i) => ({ sequence: i + 1, event: "x", actor: "a", at: "t" }));
+  raw.nextSequence = 129;
+  assert.throws(() => change(raw, "cancel", "developer"), /audit capacity/);
 });

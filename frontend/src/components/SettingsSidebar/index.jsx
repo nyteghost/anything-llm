@@ -408,6 +408,13 @@ const SidebarOptions = ({ user = null, t }) => (
               roles: ["admin"],
             },
             {
+              btnText: "NyteDesk",
+              href: paths.settings.nytedesk(),
+              flex: true,
+              roles: ["admin", "manager", "default"],
+              hidden: !user,
+            },
+            {
               btnText: t("settings.scheduled-jobs"),
               href: paths.settings.scheduledJobs(),
               flex: true,
