@@ -49,6 +49,27 @@ if [[ "${1:-}" == "--check-toolchain" ]]; then
   yarn --version
   exit 0
 fi
+# Reuse an installed browser rather than downloading Puppeteer's bundled copy.
+# Keep explicit caller choices; do not disable the browser's sandbox.
+FORK_BROWSER="${PUPPETEER_EXECUTABLE_PATH:-${CHROME_PATH:-}}"
+if [[ -z "$FORK_BROWSER" ]]; then
+  for candidate in chromium chromium-browser google-chrome google-chrome-stable; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      FORK_BROWSER="$(command -v "$candidate")"
+      break
+    fi
+  done
+fi
+if [[ -n "$FORK_BROWSER" ]]; then
+  [[ -x "$FORK_BROWSER" ]] || { printf 'Browser is not executable: %s\n' "$FORK_BROWSER" >&2; exit 1; }
+  export PUPPETEER_EXECUTABLE_PATH="$FORK_BROWSER" CHROME_PATH="$FORK_BROWSER"
+  export PUPPETEER_SKIP_DOWNLOAD=true
+  printf 'Using installed browser: %s (skipping bundled download)\n' "$FORK_BROWSER"
+fi
+if [[ "${1:-}" == "--check-browser" ]]; then
+  if [[ -z "$FORK_BROWSER" ]]; then printf '%s\n' 'No installed Chromium/Chrome found; bundled download remains enabled.'; fi
+  exit 0
+fi
 command -v flock >/dev/null || { printf '%s\n' 'flock is required (util-linux on CachyOS).' >&2; exit 1; }
 mkdir -p server/storage
 exec 9>server/storage/.fork-run.lock
