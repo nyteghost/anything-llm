@@ -11,18 +11,20 @@ function fixture(broken = false) {
   fs.mkdirSync(path.join(root, 'bin'));
   fs.copyFileSync(path.join(__dirname, '../../tools/linux-run.sh'), path.join(root, 'tools/linux-run.sh'));
   function binary(name, content) { fs.writeFileSync(path.join(root, 'bin', name), '#!/bin/bash\n' + content, { mode: 0o755 }); }
-  binary('node', 'echo 26\n');
+  binary('node', 'if [[ \"${2:-}\" == \"process.arch\" ]]; then echo x64; else echo 26; fi\n');
   binary('npx', 'echo RECURSION >&2; exit 99\n');
   binary('npm', `
+arguments="$*"
 while [[ $# -gt 0 ]]; do
   if [[ "$1" == "--prefix" ]]; then prefix="$2"; shift 2; else shift; fi
 done
 printf 'install\\n' >> "$prefix/install-count"
-mkdir -p "$prefix/node_modules/node/bin" "$prefix/node_modules/yarn/bin"
-printf '#!/bin/bash\\necho ${broken ? '26' : '24'}\\n' > "$prefix/node_modules/node/bin/node"
+printf '%s\\n' "$arguments" > "$prefix/install-arguments"
+mkdir -p "$prefix/node_modules/node-linux-x64/bin" "$prefix/node_modules/yarn/bin"
+printf '#!/bin/bash\\necho ${broken ? '26' : '24'}\\n' > "$prefix/node_modules/node-linux-x64/bin/node"
 printf '#!/bin/bash\\necho 1.22.22\\n' > "$prefix/node_modules/yarn/bin/yarn"
 printf '// fixture\\n' > "$prefix/node_modules/yarn/bin/yarn.js"
-chmod +x "$prefix/node_modules/node/bin/node" "$prefix/node_modules/yarn/bin/yarn"
+chmod +x "$prefix/node_modules/node-linux-x64/bin/node" "$prefix/node_modules/yarn/bin/yarn"
 `);
   return root;
 }
@@ -39,6 +41,10 @@ test('installs explicit tools once, then reuses them without npm-exec recursion'
     const first = run(root);
     assert.equal(first.status, 0, first.stderr);
     assert.match(first.stdout, /24\n1\.22\.22/);
+    const argumentsUsed = fs.readFileSync(path.join(root, 'server/storage/.fork-toolchain/install-arguments'), 'utf8');
+    assert.match(argumentsUsed, /--ignore-scripts/);
+    assert.match(argumentsUsed, /node-linux-x64@24\.22\.3/);
+    assert.ok(!argumentsUsed.includes(' node@'));
     assert.ok(!first.stderr.includes('RECURSION'));
     const second = run(root);
     assert.equal(second.status, 0, second.stderr);
