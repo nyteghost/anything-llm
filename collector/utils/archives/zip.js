@@ -3,8 +3,8 @@ const { inflateRawSync } = require("zlib");
 const LIMITS = Object.freeze({
   archiveBytes: 64 * 1024 * 1024,
   totalBytes: 128 * 1024 * 1024,
-  entryBytes: 8 * 1024 * 1024,
-  entries: 1000,
+  entryBytes: 16 * 1024 * 1024,
+  entries: 10000,
   ratio: 250,
 });
 
@@ -45,7 +45,7 @@ function openZip(buffer, limits = LIMITS) {
   const centralStart = buffer.readUInt32LE(end + 16);
   if (count === 0xffff || centralSize === 0xffffffff || centralStart === 0xffffffff)
     throw new Error("ZIP64 is not supported. Upload smaller ZIPs.");
-  if (count > limits.entries) throw new Error("ZIP exceeds the 1,000-entry limit.");
+  if (count > limits.entries) throw new Error(`ZIP contains ${count.toLocaleString("en-US")} entries; the limit is ${limits.entries.toLocaleString("en-US")}. Split this archive.`);
   if (centralStart + centralSize !== end) throw new Error("Invalid ZIP directory layout.");
   let cursor = centralStart;
   let total = 0;
