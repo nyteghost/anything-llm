@@ -29,7 +29,7 @@ test('reports symlinks, encrypted entries, duplicates and nested archives', () =
 });
 test('bounds entries, declared expansion, member size and compression ratio', () => {
   const data = zip([{ name: 'a', content: 'hello' }]);
-  assert.throws(() => openZip(data, { ...LIMITS, entries: 0 }), /entry limit/);
+  assert.throws(() => openZip(data, { ...LIMITS, entries: 0 }), /the limit is/);
   assert.throws(() => openZip(data, { ...LIMITS, totalBytes: 1 }), /128 MiB/);
   assert.match(openZip(data, { ...LIMITS, entryBytes: 1 })[0].skipReason, /limit/);
   assert.match(openZip(zip([{ name: 'a', content: 'x'.repeat(100000) }]))[0].skipReason, /limit/);
@@ -54,4 +54,12 @@ test('skips dependencies and unsupported compression; handles empty ZIP', () => 
   assert.match(entries[0].skipReason, /dependency/);
   assert.match(entries[1].skipReason, /compression/);
   assert.deepEqual(openZip(zip([])), []);
+});
+
+test('accepts ordinary repositories above 1000 entries but enforces the new hard cap', () => {
+  const entries = openZip(zip(Array.from({ length: 2200 }, (_, i) => ({ name: `src/file-${i}.py`, content: 'print(1)' }))));
+  assert.equal(entries.length, 2200);
+  assert.equal(entries[2199].read().toString(), 'print(1)');
+  const tooMany = zip(Array.from({ length: 10001 }, (_, i) => ({ name: `f${i}`, content: '' })));
+  assert.throws(() => openZip(tooMany), /10,001 entries; the limit is 10,000/);
 });
