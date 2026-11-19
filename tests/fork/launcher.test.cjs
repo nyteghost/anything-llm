@@ -60,3 +60,20 @@ test('wrong toolchain version fails once instead of restarting indefinitely', { 
     assert.ok(!result.stderr.includes('RECURSION'));
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+test('uses an explicit installed browser and rejects invalid browser paths', { skip: process.getuid?.() === 0 }, () => {
+  const root = fixture();
+  try {
+    assert.equal(run(root).status, 0);
+    const browser = path.join(root, 'bin', 'test-chromium');
+    fs.writeFileSync(browser, '#!/bin/bash\nexit 0\n', { mode: 0o755 });
+    const options = { cwd: root, encoding: 'utf8', timeout: 5000, env: { ...process.env, PATH: path.join(root, 'bin') + ':/usr/bin:/bin', PUPPETEER_EXECUTABLE_PATH: browser } };
+    const result = spawnSync('/bin/bash', ['tools/linux-run.sh', '--check-browser'], options);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /skipping bundled download/);
+    options.env.PUPPETEER_EXECUTABLE_PATH = path.join(root, 'missing-browser');
+    const invalid = spawnSync('/bin/bash', ['tools/linux-run.sh', '--check-browser'], options);
+    assert.equal(invalid.status, 1);
+    assert.match(invalid.stderr, /not executable/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
