@@ -20,10 +20,26 @@ if [[ "${EUID}" -eq 0 ]]; then
 fi
 command -v node >/dev/null || { printf '%s\n' 'Install Node.js and npm first (CachyOS packages: nodejs and npm).' >&2; exit 1; }
 command -v npm >/dev/null || { printf '%s\n' 'Install npm first.' >&2; exit 1; }
-# Match the upstream Docker build's Node major without replacing system Node.
-# npm obtains user-local Node/Yarn tooling; subsequent launches reuse its cache.
+# Match the upstream build's Node major without recursively relaunching through
+# npm exec. npm exec can put project binaries ahead of the requested tools.
+# An explicit, checkout-local toolchain makes selection deterministic.
 if [[ "$(node -p 'process.versions.node.split(".")[0]')" != "24" ]] || ! command -v yarn >/dev/null || [[ "$(yarn --version)" != 1.* ]]; then
-  exec npx --yes --package=node@24 --package=yarn@1.22.22 -c 'bash "$LOCALAI_FORK_ROOT/tools/linux-run.sh"'
+  FORK_TOOLCHAIN="$LOCALAI_FORK_ROOT/server/storage/.fork-toolchain"
+  mkdir -p "$FORK_TOOLCHAIN"
+  if [[ ! -x "$FORK_TOOLCHAIN/node_modules/node/bin/node" ]] || [[ ! -f "$FORK_TOOLCHAIN/node_modules/yarn/bin/yarn.js" ]]; then
+    printf '%s\n' 'Installing checkout-local Node 24 and Yarn Classic (one-time setup)…'
+    npm install --prefix "$FORK_TOOLCHAIN" --no-save --package-lock=false node@24 yarn@1.22.22
+  fi
+  export PATH="$FORK_TOOLCHAIN/node_modules/node/bin:$FORK_TOOLCHAIN/node_modules/yarn/bin:$PATH"
+fi
+if [[ "$(node -p 'process.versions.node.split(".")[0]')" != "24" ]] || ! command -v yarn >/dev/null || [[ "$(yarn --version)" != 1.* ]]; then
+  printf '%s\n' 'Could not select Node 24 and Yarn Classic. Setup stopped; no automatic relaunch.' >&2
+  exit 1
+fi
+if [[ "${1:-}" == "--check-toolchain" ]]; then
+  node --version
+  yarn --version
+  exit 0
 fi
 command -v flock >/dev/null || { printf '%s\n' 'flock is required (util-linux on CachyOS).' >&2; exit 1; }
 mkdir -p server/storage
