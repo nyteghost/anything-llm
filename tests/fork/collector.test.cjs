@@ -99,13 +99,14 @@ test('direct bat/cmd/ps1 use text converter and accept-list includes scripts and
 });
 
 test('rejects oversized aggregate text instead of returning a partial bundle', async () => {
-  const content = Array.from({ length: 4_000_100 }, (_, i) => String.fromCharCode(33 + (i * 31 % 90))).join('');
-  // Stored method avoids intentionally hitting the compression-ratio guard.
-  const target = upload('too-much.zip', zip([{ name: 'a.txt', content: 'small' }, { name: 'b.txt', content, method: 0 }]));
+  const { randomBytes } = require('node:crypto');
+  const pattern = randomBytes(128000).map(byte => 32 + byte % 95);
+  const content = Buffer.concat(Array(63).fill(pattern));
+  const target = upload('too-much.zip', zip(Array.from({ length: 8 }, (_, i) => ({ name: `source-${i}.txt`, content }))));
   const before = saved.length;
   const result = await asZip({ fullFilePath: target, filename: 'too-much.zip' });
   assert.equal(result.success, false);
-  assert.match(result.reason, /4,000,000/);
+  assert.match(result.reason, /64,000,000/);
   assert.equal(result.documents.length, 0);
   assert.equal(saved.length, before);
 });
