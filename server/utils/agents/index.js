@@ -1048,4 +1048,3 @@ class AgentHandler {
 }
 
 module.exports.AgentHandler = AgentHandler;
-

@@ -337,12 +337,20 @@ const Document = {
 
     const { fileData } = require("../utils/files");
     const data = await fileData(document.docpath);
-    return { title: data.title, content: data.pageContent, archiveManifest: data.archiveManifest || null };
+    return {
+      title: data.title,
+      content: data.pageContent,
+      archiveManifest: data.archiveManifest || null,
+    };
   },
   contentByDocPath: async function (docPath) {
     const { fileData } = require("../utils/files");
     const data = await fileData(docPath);
-    return { title: data.title, content: data.pageContent, archiveManifest: data.archiveManifest || null };
+    return {
+      title: data.title,
+      content: data.pageContent,
+      archiveManifest: data.archiveManifest || null,
+    };
   },
 
   // Some data sources have encoded params in them we don't want to log - so strip those details.
@@ -428,4 +436,3 @@ const Document = {
 };
 
 module.exports = { Document };
-
