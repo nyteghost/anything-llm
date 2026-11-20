@@ -107,7 +107,10 @@ describe("WORKSPACE_AGENT.getDefinition", () => {
       null,
       workspace.id
     );
-    expect(definition.role).toBe(expandedPrompt);
+    expect(definition.role.startsWith(expandedPrompt)).toBe(true);
+    expect(definition.role).toContain(
+      "Do not claim tests, shell execution, web access, or persistent memory"
+    );
   });
 
   it("should return functions array in definition", async () => {
