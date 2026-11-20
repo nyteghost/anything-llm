@@ -9,7 +9,8 @@ export default function useTextSize() {
       setTextSizePx(normalizeChatFontSize(event.detail));
     };
     window.addEventListener("textSizeChange", handleTextSizeChange);
-    return () => window.removeEventListener("textSizeChange", handleTextSizeChange);
+    return () =>
+      window.removeEventListener("textSizeChange", handleTextSizeChange);
   }, []);
 
   // Preserve the historic hook shape for older consumers.

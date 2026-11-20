@@ -5,12 +5,14 @@ import CTAButton from "@/components/lib/CTAButton";
 import useUser from "@/hooks/useUser";
 import NyteDesk from "@/models/nytedesk";
 import showToast from "@/utils/toast";
+import LocalAIEngines from "./LocalAIEngines";
 
 // Must match server/utils/nytedesk/control-plane.cjs. The server is the
 // authority; these lists only populate the form.
 const ADAPTERS = [
   "ollama",
   "strata",
+  "polystrata",
   "claude-code",
   "codex",
   "anthropic",
@@ -62,7 +64,7 @@ const TEXT = {
     "Every action needs approval from a different manager or administrator. Protected actions (VM write/execute, browser interaction, git push/merge, credentials, privileges, publication) need an administrator.",
   approvals: "Open a task to review its exact payload before deciding.",
   providers:
-    "Endpoints and model names only. API keys are never stored by NyteDesk: name an environment variable (NYTEDESK_…) that the server owner sets. Local providers must use an IP address; Anthropic and OpenAI use their official API origins. The Claude Code and Codex CLIs are configured inside the VM.",
+    "Hosted model APIs only: endpoints and model names. API keys are never stored by NyteDesk: name an environment variable (NYTEDESK_…) that the server owner sets. Anthropic and OpenAI use their official API origins. Local engines are configured under Local AI Engines; the Claude Code and Codex CLIs are configured inside the VM.",
 };
 const input =
   "bg-theme-settings-input-bg text-white text-sm rounded-lg p-2 border border-white/10";
@@ -166,6 +168,7 @@ export default function NyteDeskDashboard() {
               setSelected={setSelected}
               providers={providers}
               isAdmin={role === "admin"}
+              role={role}
               openTask={openTask}
               afterChange={afterChange}
               refresh={refresh}
@@ -193,6 +196,7 @@ function Dashboard(props) {
   return (
     <>
       <AgentsPanel agents={props.agents} />
+      <LocalAIEngines role={props.role} />
       <CreateTask workspaces={props.workspaces} onCreated={afterChange} />
       <Approvals approvals={props.approvals} onOpen={props.openTask} />
       <History

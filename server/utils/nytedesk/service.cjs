@@ -20,6 +20,7 @@
  * Nothing here executes a model, shell, browser, VM or network call.
  */
 const cp = require("./control-plane.cjs");
+const lam = require("./local-ai-manager.cjs");
 const { NyteDeskError, sha256 } = require("./store.cjs");
 
 const DECIDER_ROLES = Object.freeze(["admin", "manager"]);
@@ -32,11 +33,25 @@ const OFFICIAL_API = Object.freeze({
 const SECRET_FIELDS =
   /^(api[_-]?key|key|secret|token|password|authorization|bearer)$/i;
 const PROVIDER_FIELDS = ["baseUrl", "model", "keyEnv", "expectedVersion"];
-// Endpoint configuration applies to model APIs. The CLI agents (Claude Code,
-// Codex) run inside the VM and are configured there, not here.
+// Provider configuration covers the hosted model APIs. Local engines (Ollama,
+// Strata, PolyStrata) are configured in the Local AI Manager; the CLI agents
+// (Claude Code, Codex) run inside the VM and are configured there.
 const PROVIDER_IDS = Object.freeze(
-  cp.AGENTS.filter((a) => a.runtime !== "vm-cli").map((a) => a.id)
+  cp.AGENTS.filter((a) => a.runtime === "cloud-api").map((a) => a.id)
 );
+const ENGINE_FIELDS = [
+  "endpoint",
+  "api",
+  "model",
+  "contextWindow",
+  "vramReserveMiB",
+  "expectedVersion",
+];
+const SELECTION_KEY = "engine_selection";
+// A selection needs a successful availability check no older than this.
+const SELECTION_MAX_CHECK_AGE_MS = 15 * 60 * 1000;
+const PROCESS_DENIED =
+  "Process control is disabled: NyteDesk never starts, stops, restarts, unloads or kills inference engines. Running engines are externally owned.";
 const OPEN_STATES = ["waiting_approval", "approved", "running"];
 
 function assertActor(actor) {
@@ -162,6 +177,77 @@ function validateProvider(id, body) {
   return { kind: id, baseUrl: url, model, keyEnv, expectedVersion };
 }
 
+function boundedInt(value, field, min, max) {
+  if (value === null || value === undefined) return null;
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    throw new NyteDeskError(400, `${field} must be an integer ${min}-${max}`);
+  }
+  return value;
+}
+
+function validateEngine(id, body) {
+  if (!Object.hasOwn(lam.ENGINES, id)) {
+    throw new NyteDeskError(404, "Unknown inference engine");
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new NyteDeskError(400, "Invalid body");
+  }
+  for (const key of Object.keys(body)) {
+    if (SECRET_FIELDS.test(key)) {
+      throw new NyteDeskError(400, "Credentials are never stored by NyteDesk");
+    }
+    if (!ENGINE_FIELDS.includes(key)) {
+      throw new NyteDeskError(400, `Unknown field: ${key}`);
+    }
+  }
+  const engine = lam.ENGINES[id];
+  const { expectedVersion } = body;
+  if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0) {
+    throw new NyteDeskError(400, "expectedVersion is required");
+  }
+  let endpoint = null;
+  if (body.endpoint !== null && body.endpoint !== undefined) {
+    try {
+      endpoint = lam.parseLoopbackEndpoint(body.endpoint);
+    } catch (error) {
+      throw new NyteDeskError(400, error.message);
+    }
+  }
+  let api = body.api ?? null;
+  if (engine.api) {
+    if (api !== null && api !== engine.api) {
+      throw new NyteDeskError(400, `${engine.name} uses the ${engine.api} API`);
+    }
+    api = engine.api;
+  } else if (api !== null && !lam.API_KINDS.includes(api)) {
+    throw new NyteDeskError(400, "api must be ollama or openai");
+  }
+  const model = body.model ?? null;
+  if (model !== null && (typeof model !== "string" || !MODEL_RE.test(model))) {
+    throw new NyteDeskError(400, "Invalid model name");
+  }
+  const contextWindow = boundedInt(
+    body.contextWindow,
+    "contextWindow",
+    512,
+    4194304
+  );
+  const vramReserveMiB = boundedInt(
+    body.vramReserveMiB,
+    "vramReserveMiB",
+    0,
+    262144
+  );
+  return {
+    endpoint,
+    api,
+    model,
+    contextWindow,
+    vramReserveMiB,
+    expectedVersion,
+  };
+}
+
 function createService(store, options = {}) {
   const env = options.env ?? process.env;
 
@@ -198,6 +284,7 @@ function createService(store, options = {}) {
         executionEnabled: false,
         browserAutomation: false,
         vmOperations: false,
+        engineProcessControl: false,
         agentsMayApprove: false,
         storage: "sqlite",
         executionPreconditions: cp.EXECUTION_PRECONDITIONS.map((id) => ({
@@ -357,6 +444,142 @@ function createService(store, options = {}) {
       });
     },
 
+    /** The engine registry merged with stored configuration and last checks. */
+    engines(actor) {
+      assertActor(actor);
+      const stored = new Map(store.listEngines().map((e) => [e.id, e]));
+      const checks = store.engineChecks();
+      const selection = store.getMeta(SELECTION_KEY);
+      const list = Object.values(lam.ENGINES).map((engine) => {
+        const cfg = stored.get(engine.id);
+        return {
+          id: engine.id,
+          name: engine.name,
+          api: cfg?.api ?? engine.api,
+          endpoint: cfg?.endpoint ?? engine.defaultEndpoint,
+          endpointIsDefault: !cfg?.endpoint && !!engine.defaultEndpoint,
+          model: cfg?.model ?? null,
+          contextWindow: cfg?.contextWindow ?? null,
+          vramReserveMiB: cfg?.vramReserveMiB ?? null,
+          version: cfg?.version ?? 0,
+          updatedBy: cfg?.updatedBy ?? null,
+          updatedAt: cfg?.updatedAt ?? null,
+          lastCheck: checks[engine.id] ?? null,
+          ownership: "external",
+          canStart: false,
+          canStop: false,
+        };
+      });
+      return { engines: list, selection, processControl: false };
+    },
+
+    putEngine(actor, id, body, idempotencyKey) {
+      assertActor(actor);
+      if (actor.role !== "admin") {
+        throw new NyteDeskError(
+          403,
+          "Only administrators may change engine configuration"
+        );
+      }
+      const cfg = validateEngine(id, body);
+      const route = `PUT /nytedesk/engines/${id}`;
+      const hash = requestHash("PUT", route, cfg);
+      return store.idempotent(actor.id, idempotencyKey, hash, () => {
+        store.putEngine(id, actor, cfg);
+        const engine = service.engines(actor).engines.find((e) => e.id === id);
+        return { status: 200, body: { engine } };
+      });
+    },
+
+    /** Read-only availability check of one engine's model list. */
+    async checkEngine(actor, id, probe = lam.probeEngine) {
+      assertActor(actor);
+      if (!DECIDER_ROLES.includes(actor.role)) {
+        throw new NyteDeskError(
+          403,
+          "Only managers and administrators may run engine checks"
+        );
+      }
+      if (!Object.hasOwn(lam.ENGINES, id)) {
+        throw new NyteDeskError(404, "Unknown inference engine");
+      }
+      const engine = service.engines(actor).engines.find((e) => e.id === id);
+      const config = {
+        id,
+        endpoint: engine.endpoint,
+        api: engine.api,
+        model: engine.model,
+      };
+      const result = await probe(config, options.probeOptions ?? {});
+      store.saveEngineCheck(id, actor, result);
+      return result;
+    },
+
+    /** Choose the engine the coordinator would use; it must check healthy. */
+    selectEngine(actor, body, idempotencyKey) {
+      assertActor(actor);
+      if (actor.role !== "admin") {
+        throw new NyteDeskError(403, "Only administrators may select engines");
+      }
+      const { engineId, expectedSelectionId = null } = body || {};
+      if (!Object.hasOwn(lam.ENGINES, engineId)) {
+        throw new NyteDeskError(404, "Unknown inference engine");
+      }
+      const route = "PUT /nytedesk/engine-selection";
+      const fields = { engineId, expectedSelectionId };
+      const hash = requestHash("PUT", route, fields);
+      return store.idempotent(actor.id, idempotencyKey, hash, () => {
+        const current = store.getMeta(SELECTION_KEY);
+        if ((current?.selectionId ?? null) !== expectedSelectionId) {
+          throw new NyteDeskError(409, "Selection changed; reload and retry");
+        }
+        const all = service.engines(actor).engines;
+        const engine = all.find((e) => e.id === engineId);
+        const check = engine.lastCheck;
+        const age = check ? Date.now() - Date.parse(check.checkedAt) : Infinity;
+        if (!check || check.status !== lam.STATUSES.EXTERNAL) {
+          throw new NyteDeskError(
+            409,
+            "Run a successful availability check before selecting this engine"
+          );
+        }
+        if (age > SELECTION_MAX_CHECK_AGE_MS) {
+          throw new NyteDeskError(
+            409,
+            "The last check is too old; check again"
+          );
+        }
+        if (check.endpoint !== engine.endpoint) {
+          throw new NyteDeskError(409, "The endpoint changed since the check");
+        }
+        if (engine.model && check.modelListed !== true) {
+          throw new NyteDeskError(
+            409,
+            "The selected model was not listed by the engine"
+          );
+        }
+        const selection = {
+          selectionId: sha256(`${engineId}:${actor.id}:${Date.now()}`),
+          engineId,
+          endpoint: engine.endpoint,
+          model: engine.model,
+          by: Number(actor.id),
+          at: new Date().toISOString(),
+        };
+        store.swapMeta(SELECTION_KEY, current, selection);
+        return { status: 200, body: { selection } };
+      });
+    },
+
+    /** Every process action is refused; the engine's owner manages it. */
+    processAction(actor, id) {
+      assertActor(actor);
+      if (!Object.hasOwn(lam.ENGINES, id)) {
+        throw new NyteDeskError(404, "Unknown inference engine");
+      }
+      throw new NyteDeskError(403, PROCESS_DENIED);
+    },
+
     putProvider(actor, id, body, idempotencyKey) {
       assertActor(actor);
       if (actor.role !== "admin") {
@@ -382,6 +605,7 @@ module.exports = {
   createService,
   canDecide,
   validateProvider,
+  validateEngine,
   isLocalLiteral,
   PROVIDER_IDS,
 };

@@ -59,6 +59,19 @@ const NyteDesk = {
     const body = { expectedVersion: task.version, reason: reason || null };
     return request("POST", taskPath(task, "cancel"), { body, key });
   },
+  engines: () => request("GET", "/nytedesk/engines"),
+  saveEngine: (id, body, key) => {
+    const path = `/nytedesk/engines/${encodeURIComponent(id)}`;
+    return request("PUT", path, { body, key });
+  },
+  checkEngine: (id) => {
+    const path = `/nytedesk/engines/${encodeURIComponent(id)}/check`;
+    return request("POST", path);
+  },
+  selectEngine: (engineId, expectedSelectionId, key) => {
+    const body = { engineId, expectedSelectionId };
+    return request("PUT", "/nytedesk/engine-selection", { body, key });
+  },
   providers: () => request("GET", "/nytedesk/providers"),
   saveProvider: (id, body, key) => {
     const path = `/nytedesk/providers/${encodeURIComponent(id)}`;
