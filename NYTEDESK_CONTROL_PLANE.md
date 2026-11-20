@@ -105,10 +105,27 @@ Identity comes only from the authenticated AnythingLLM session. No request body 
 ### Provider configuration
 
 - This is configuration only. Execution stays disabled.
-- It covers the model APIs: `ollama`, `strata`, `anthropic` and `openai`. The Claude Code and Codex CLIs run inside the VM and are configured there, not here.
+- It covers the cloud model APIs: `anthropic` and `openai`. Local engines (Ollama, Strata, PolyStrata) moved to the Local AI Manager below. The Claude Code and Codex CLIs run inside the VM and are configured there, not here.
 - **Keys are never stored.** A request containing `apiKey`, `key`, `token`, `secret`, `password` or similar is rejected. `keyEnv` names an environment variable, which must start with `NYTEDESK_`, that the server owner sets. The API reports only whether it is set.
-- **Ollama and Strata:** the base URL must be an IP literal on loopback, a private network or the tailnet (no host names, so no DNS rebinding). It may not contain credentials, a query or a fragment.
 - **Anthropic and OpenAI:** the base URL is restricted to their official API origins. Configuring them requires `keyEnv`.
+
+### Local AI Manager (read-only, external ownership)
+
+Code: `server/utils/nytedesk/local-ai-manager.cjs`, engine methods in `service.cjs`, routes in `routes.cjs`, UI in `frontend/src/pages/NyteDesk/LocalAIEngines.jsx`. Tests: `tests/fork/nytedesk-engines.test.cjs`, `tests/fork/local-ai-manager.test.cjs`.
+
+| Engine | API | Default endpoint |
+|---|---|---|
+| Ollama | `ollama` (`GET /api/tags`) | `http://127.0.0.1:11434` |
+| PolyStrata | OpenAI-compatible (`GET {endpoint}/models`) | none: the owner sets it (the tested port 40537 is not hardcoded) |
+| Strata | `ollama` or `openai`, chosen by the owner | none: no endpoint is invented |
+
+- **Configuration (admin only):** endpoint, model, context window (512–4194304), VRAM reserve in MiB (0–262144), and the API kind for Strata. Writes use compare-and-swap on `expectedVersion` and an idempotency key. Secret-named and unknown fields are refused.
+- **Endpoint policy:** `http://` only, host `127.0.0.1` or `[::1]`, explicit port ≥ 1024, and no credentials, query, fragment or `..`. Engines stay on the same machine as NyteDesk.
+- **Check (manager or admin):** a single `GET` with no proxy, no redirects, a 3 s timeout and a 1 MiB response limit. It never throws. It returns reachability, latency, up to 200 model names, whether the configured model is listed, and coded diagnostics (`NOT_CONFIGURED`, `CONNECTION_REFUSED`, `TIMEOUT`, `REDIRECT_REFUSED`, `HTTP_ERROR`, `RESPONSE_TOO_LARGE`, `INVALID_JSON`, `UNEXPECTED_SHAPE`, `NO_MODELS`, `MODEL_NOT_LISTED`, `INVALID_ENDPOINT` and others). The last result per engine is stored.
+- **Selection (admin only):** allowed only after a check of the current endpoint less than 15 minutes old (with a valid timestamp) that reached the engine and, when a model is configured, listed it. One rule (`selectionBlocker`) feeds both the route and the listing's `selectable` and `selectionBlockedReason` fields, so the UI never offers a selection the server would refuse. Selection uses compare-and-swap, so two admins cannot overwrite each other silently. Changing the endpoint invalidates the old check.
+- **Model names** reported by an engine are untrusted. Only printable names of at most 256 characters are kept, each once, up to 200.
+- **Process control: none.** `POST /nytedesk/engines/:id/process` always returns 403 for every role and action. The module contains no `child_process`, signal or kill code (a test enforces this). Every engine is reported as `ownership: "external"`, `canStart: false`, `canStop: false`. NyteDesk never starts, stops, restarts, unloads or kills an engine, and never matches a process by name.
+- The selected engine is a **coordinator only**: its output grants no privileges, and AgentBridge and the approval ledger remain the authority.
 
 ## Security review of the original state machine (findings and status)
 
@@ -127,7 +144,7 @@ Identity comes only from the authenticated AnythingLLM session. No request body 
 ## Remaining limitations (not done in Phase 1)
 
 - **L1. Build not verified here.** The frontend production build (`yarn build`) and a server start with real Prisma were **not** run: this environment cannot install npm packages. The changed frontend files pass a TypeScript-parser syntax check, the server files pass `node --check`, and the dashboard and routes are covered by the tests above. A local `bash tools/linux-run.sh` build is still needed.
-- **L2. The API test uses stub authentication.** It does not exercise AnythingLLM's real JWT/session code. The production wiring in `server/endpoints/nytedesk.js` is small but untested end to end.
+- **L2. Real-session coverage is partial.** `server/__tests__/endpoints/nytedesk/nytedesk.test.js` (Jest, runs in CI) mounts the real `server/endpoints/nytedesk.js` with AnythingLLM's real `validatedRequest` and JWTs. It covers missing, forged and suspended tokens, requester identity, self-approval, workspace isolation, engine process denial, role limits on engine changes, and the feature and multi-user gates. Users, workspaces and settings are mocked, so a server start against real Prisma is still untested.
 - **L3. No executor, model call, VM worker or browser worker.** There is no executor role and no cancellation hand-off to a running job.
 - **L4. Idempotency records and audit grow without retention.** There is no compaction yet. Each task's audit is capped at 128 events (refused beyond that, never dropped).
 - **L5. The audit chain is per task.** It detects edits inside a task's history, but not the removal of a whole task together with its audit by someone with direct file access. An off-host anchor (as in AgentBridge Stage B) would close this.

@@ -206,6 +206,52 @@ function createNyteDeskRoutes(app, deps) {
   );
 
   app.get(
+    "/nytedesk/engines",
+    mw,
+    handler(async (_req, res, actor) => {
+      res.status(200).json(deps.service().engines(actor));
+    })
+  );
+
+  app.put(
+    "/nytedesk/engines/:id",
+    mw,
+    handler(async (req, res, actor) => {
+      const id = String(req.params.id);
+      const svc = deps.service();
+      send(res, svc.putEngine(actor, id, body(req), key(req)));
+    })
+  );
+
+  app.post(
+    "/nytedesk/engines/:id/check",
+    mw,
+    handler(async (req, res, actor) => {
+      const id = String(req.params.id);
+      const check = await deps.service().checkEngine(actor, id);
+      res.status(200).json({ check });
+    })
+  );
+
+  // Explicit refusal, so clients get a clear answer: no process control.
+  app.post(
+    "/nytedesk/engines/:id/process",
+    mw,
+    handler(async (req, _res, actor) => {
+      deps.service().processAction(actor, String(req.params.id));
+    })
+  );
+
+  app.put(
+    "/nytedesk/engine-selection",
+    mw,
+    handler(async (req, res, actor) => {
+      const svc = deps.service();
+      send(res, svc.selectEngine(actor, body(req), key(req)));
+    })
+  );
+
+  app.get(
     "/nytedesk/providers",
     mw,
     handler(async (_req, res, actor) => {

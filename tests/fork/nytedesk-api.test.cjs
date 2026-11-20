@@ -349,45 +349,38 @@ test("state survives a restart and its audit still verifies", async () => {
   }
 });
 
-test("providers: role checks, no stored secrets, local endpoints as IP literals, official cloud origins", async () => {
+test("providers: role checks, no stored secrets, official cloud origins only", async () => {
   assert.equal((await call("GET", "/nytedesk/providers", { user: 3 })).status, 403);
   const list = await call("GET", "/nytedesk/providers", { user: 2 });
   assert.equal(list.status, 200);
-  assert.deepEqual(list.body.providers.map((p) => p.id), ["ollama", "strata", "anthropic", "openai"]);
+  assert.deepEqual(list.body.providers.map((p) => p.id), ["anthropic", "openai"]);
   const put = (user, id, body) => call("PUT", `/nytedesk/providers/${id}`, { user, key: newKey(), body });
-  assert.equal((await put(2, "ollama", { baseUrl: "http://127.0.0.1:11434", expectedVersion: 0 })).status, 403);
+  assert.equal((await put(2, "openai", { keyEnv: "NYTEDESK_OPENAI_KEY", expectedVersion: 0 })).status, 403);
   const secret = await put(1, "openai", { apiKey: "sk-live", expectedVersion: 0 });
   assert.equal(secret.status, 400);
   assert.match(secret.body.error, /never stored/);
-  assert.equal((await put(1, "ollama", { baseUrl: "http://localhost:11434", expectedVersion: 0 })).status, 400);
-  assert.equal((await put(1, "ollama", { baseUrl: "http://8.8.8.8:11434", expectedVersion: 0 })).status, 400);
-  assert.equal((await put(1, "ollama", { baseUrl: "http://user:pw@127.0.0.1:11434", expectedVersion: 0 })).status, 400);
   assert.equal((await put(1, "anthropic", { baseUrl: "https://evil.example", keyEnv: "NYTEDESK_ANTHROPIC_KEY", expectedVersion: 0 })).status, 400);
+  assert.equal((await put(1, "anthropic", { baseUrl: "https://user:pw@api.anthropic.com", keyEnv: "NYTEDESK_ANTHROPIC_KEY", expectedVersion: 0 })).status, 400);
   assert.equal((await put(1, "anthropic", { model: "claude-x", expectedVersion: 0 })).status, 400);
   assert.equal((await put(1, "openai", { keyEnv: "JWT_SECRET", expectedVersion: 0 })).status, 400);
-  const ok = await put(1, "ollama", { baseUrl: "http://10.200.1.30:11434/", model: "qwen3.5:9b", expectedVersion: 0 });
-  assert.equal(ok.status, 200, JSON.stringify(ok.body));
-  assert.equal(ok.body.provider.baseUrl, "http://10.200.1.30:11434");
-  assert.equal(ok.body.provider.version, 1);
-  assert.equal((await put(1, "ollama", { model: "other", expectedVersion: 0 })).status, 409);
   const oa = await put(1, "openai", { baseUrl: "https://api.openai.com/v1", model: "gpt-x", keyEnv: "NYTEDESK_OPENAI_KEY", expectedVersion: 0 });
   assert.equal(oa.status, 200, JSON.stringify(oa.body));
   assert.equal(oa.body.provider.keyPresent, true);
+  assert.equal(oa.body.provider.version, 1);
+  assert.equal((await put(1, "openai", { model: "gpt-y", keyEnv: "NYTEDESK_OPENAI_KEY", expectedVersion: 0 })).status, 409);
   const all = JSON.stringify((await call("GET", "/nytedesk/providers", { user: 1 })).body);
   assert.ok(!all.includes(env.NYTEDESK_OPENAI_KEY), "a key value must never be returned");
   const agents = await call("GET", "/nytedesk/agents", { user: 3 });
   assert.ok(agents.body.agents.every((a) => a.executionEnabled === false));
-  assert.equal(agents.body.agents.find((a) => a.id === "ollama").configured, true);
-  assert.equal((await put(1, "shell", { expectedVersion: 0 })).status, 404);
-  // the CLI agents run inside the VM; they have no endpoint configuration here
-  assert.equal((await put(1, "claude-code", { expectedVersion: 0 })).status, 404);
-  assert.equal((await put(1, "codex", { expectedVersion: 0 })).status, 404);
+  // local engines and the VM CLIs are not providers
+  for (const id of ["ollama", "strata", "polystrata", "claude-code", "codex", "shell"])
+    assert.equal((await put(1, id, { expectedVersion: 0 })).status, 404, id);
 });
 
 test("the task store never touches the AnythingLLM database", () => {
   assert.equal(path.basename(store.file), "nytedesk.db");
   const tables = store._db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all().map((r) => r.name);
-  assert.deepEqual(tables, ["audit", "decisions", "idempotency", "meta", "providers", "tasks"]);
+  assert.deepEqual(tables, ["audit", "decisions", "engine_checks", "engines", "idempotency", "meta", "providers", "tasks"]);
 });
 
 test("supervised mode: agents are listed with roles and can never approve or execute", async () => {
@@ -400,6 +393,7 @@ test("supervised mode: agents are listed with roles and can never approve or exe
   const byId = Object.fromEntries(a.body.agents.map((x) => [x.id, x]));
   assert.equal(byId.ollama.role, "coordinator");
   assert.equal(byId.strata.role, "coordinator");
+  assert.equal(byId.polystrata.role, "coordinator");
   assert.equal(byId["claude-code"].role, "implementer");
   assert.equal(byId["claude-code"].runtime, "vm-cli");
   assert.equal(byId.codex.role, "reviewer");

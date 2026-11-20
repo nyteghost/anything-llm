@@ -1,38 +1,11 @@
 import { useState, useEffect } from "react";
+import { readChatFontSize, subscribeChatFontSize } from "@/utils/chat/textSize";
 
 export default function useTextSize() {
-  const [textSize, setTextSize] = useState("normal");
-  const [textSizeClass, setTextSizeClass] = useState("text-[14px]");
+  const [textSizePx, setTextSizePx] = useState(readChatFontSize);
 
-  const getTextSizeClass = (size) => {
-    switch (size) {
-      case "small":
-        return "text-[12px]";
-      case "large":
-        return "text-[18px]";
-      default:
-        return "text-[14px]";
-    }
-  };
+  useEffect(() => subscribeChatFontSize(setTextSizePx), []);
 
-  useEffect(() => {
-    const storedTextSize = window.localStorage.getItem("anythingllm_text_size");
-    if (storedTextSize) {
-      setTextSize(storedTextSize);
-      setTextSizeClass(getTextSizeClass(storedTextSize));
-    }
-
-    const handleTextSizeChange = (event) => {
-      const size = event.detail;
-      setTextSize(size);
-      setTextSizeClass(getTextSizeClass(size));
-    };
-
-    window.addEventListener("textSizeChange", handleTextSizeChange);
-    return () => {
-      window.removeEventListener("textSizeChange", handleTextSizeChange);
-    };
-  }, []);
-
-  return { textSize, textSizeClass };
+  // Preserve the historic hook shape for older consumers.
+  return { textSize: textSizePx, textSizePx, textSizeClass: "" };
 }

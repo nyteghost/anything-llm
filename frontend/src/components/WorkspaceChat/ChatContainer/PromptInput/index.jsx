@@ -60,10 +60,11 @@ export default function PromptInput({
   const [_, setFocused] = useState(false);
   const undoStack = useRef([]);
   const redoStack = useRef([]);
-  const { textSize, textSizeClass } = useTextSize();
+  const { textSizePx } = useTextSize();
   // iOS Safari zooms into inputs under 16px on focus, so mobile devices get at least 16px.
-  const inputTextSizeClass =
-    isMobile && textSize !== "large" ? "text-[16px]" : textSizeClass;
+  const inputFontSize = isMobile ? Math.max(16, textSizePx) : textSizePx;
+  // Keep the original 20px line height, growing with larger font sizes.
+  const inputLineHeight = Math.max(20, Math.round(inputFontSize * 1.4));
   const [searchParams] = useSearchParams();
 
   // Synchronizes prompt input value with localStorage, scoped to the current thread.
@@ -373,7 +374,11 @@ export default function PromptInput({
                   }}
                   value={promptInput}
                   spellCheck={Appearance.get("enableSpellCheck")}
-                  className={`border-none cursor-text max-h-[50vh] md:max-h-[350px] md:min-h-[40px] pt-[20px] w-full leading-5 text-white light:text-slate-600 bg-transparent placeholder:text-white/60 light:placeholder:text-slate-400 resize-none active:outline-none focus:outline-none flex-grow pwa:!text-[16px] ${inputTextSizeClass}`}
+                  className={`border-none cursor-text max-h-[50vh] md:max-h-[350px] md:min-h-[40px] pt-[20px] w-full leading-5 text-white light:text-slate-600 bg-transparent placeholder:text-white/60 light:placeholder:text-slate-400 resize-none active:outline-none focus:outline-none flex-grow pwa:!text-[16px]`}
+                  style={{
+                    fontSize: `${inputFontSize}px`,
+                    lineHeight: `${inputLineHeight}px`,
+                  }}
                   placeholder={t("chat_window.send_message")}
                 />
               </div>

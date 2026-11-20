@@ -133,6 +133,23 @@ CREATE TABLE IF NOT EXISTS idempotency (
   at TEXT NOT NULL,
   PRIMARY KEY (actor_id, key)
 );
+CREATE TABLE IF NOT EXISTS engines (
+  id TEXT PRIMARY KEY,
+  endpoint TEXT,
+  api TEXT,
+  model TEXT,
+  context_window INTEGER,
+  vram_reserve_mib INTEGER,
+  version INTEGER NOT NULL,
+  updated_by INTEGER,
+  updated_at TEXT
+);
+CREATE TABLE IF NOT EXISTS engine_checks (
+  id TEXT PRIMARY KEY,
+  result_json TEXT NOT NULL,
+  checked_by INTEGER NOT NULL,
+  checked_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS providers (
   id TEXT PRIMARY KEY,
   kind TEXT NOT NULL,
@@ -169,6 +186,22 @@ const SQL = Object.freeze({
     WHERE actor_id = ? AND key = ?`,
   insertIdempotency: `INSERT INTO idempotency (actor_id, key, request_hash,
     status, response_json, at) VALUES (?, ?, ?, ?, ?, ?)`,
+  engines: "SELECT * FROM engines ORDER BY id",
+  engineVersion: "SELECT version FROM engines WHERE id = ?",
+  updateEngine: `UPDATE engines SET endpoint = ?, api = ?, model = ?,
+    context_window = ?, vram_reserve_mib = ?, version = ?, updated_by = ?,
+    updated_at = ? WHERE id = ? AND version = ?`,
+  insertEngine: `INSERT INTO engines (id, endpoint, api, model,
+    context_window, vram_reserve_mib, version, updated_by, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+  engineChecks: "SELECT * FROM engine_checks ORDER BY id",
+  saveEngineCheck: `INSERT INTO engine_checks (id, result_json, checked_by,
+    checked_at) VALUES (?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET
+    result_json = excluded.result_json, checked_by = excluded.checked_by,
+    checked_at = excluded.checked_at`,
+  meta: "SELECT value FROM meta WHERE key = ?",
+  insertMeta: "INSERT INTO meta (key, value) VALUES (?, ?)",
+  updateMeta: "UPDATE meta SET value = ? WHERE key = ? AND value = ?",
   providers: "SELECT * FROM providers ORDER BY id",
   providerVersion: "SELECT version FROM providers WHERE id = ?",
   updateProvider: `UPDATE providers SET kind = ?, base_url = ?, model = ?,
@@ -667,6 +700,90 @@ function openStore(options = {}) {
         sql("insertProvider").run(id, kind, baseUrl, model, keyEnv, by, at);
       }
       return store.listProviders().find((p) => p.id === id);
+    },
+
+    listEngines() {
+      return sql("engines")
+        .all()
+        .map((r) => ({
+          id: r.id,
+          endpoint: r.endpoint,
+          api: r.api,
+          model: r.model,
+          contextWindow:
+            r.context_window === null ? null : Number(r.context_window),
+          vramReserveMiB:
+            r.vram_reserve_mib === null ? null : Number(r.vram_reserve_mib),
+          version: Number(r.version),
+          updatedBy: r.updated_by === null ? null : Number(r.updated_by),
+          updatedAt: r.updated_at,
+        }));
+    },
+
+    /** Inside a transaction: upsert an engine with a version check (0 = new). */
+    putEngine(id, actor, cfg) {
+      const row = sql("engineVersion").get(id);
+      const current = row ? Number(row.version) : 0;
+      const stale = "Engine configuration changed; reload and retry";
+      if (cfg.expectedVersion !== current) throw new NyteDeskError(409, stale);
+      const at = now();
+      const by = Number(actor.id);
+      const values = [
+        cfg.endpoint,
+        cfg.api,
+        cfg.model,
+        cfg.contextWindow,
+        cfg.vramReserveMiB,
+      ];
+      if (row) {
+        const r = sql("updateEngine").run(
+          ...values,
+          current + 1,
+          by,
+          at,
+          id,
+          current
+        );
+        if (Number(r.changes) !== 1) throw new NyteDeskError(409, stale);
+      } else {
+        sql("insertEngine").run(id, ...values, by, at);
+      }
+      return store.listEngines().find((e) => e.id === id);
+    },
+
+    /** The latest availability check per engine (an observation, not config). */
+    engineChecks() {
+      const out = {};
+      for (const r of sql("engineChecks").all()) {
+        out[r.id] = {
+          ...JSON.parse(r.result_json),
+          checkedBy: Number(r.checked_by),
+        };
+      }
+      return out;
+    },
+
+    saveEngineCheck(id, actor, result) {
+      const json = JSON.stringify(result);
+      sql("saveEngineCheck").run(id, json, Number(actor.id), result.checkedAt);
+    },
+
+    getMeta(key) {
+      const row = sql("meta").get(key);
+      return row ? JSON.parse(row.value) : null;
+    },
+
+    /** Inside a transaction: compare-and-swap a JSON meta value. */
+    swapMeta(key, previous, next) {
+      const value = JSON.stringify(next);
+      if (previous === null) {
+        sql("insertMeta").run(key, value);
+        return;
+      }
+      const r = sql("updateMeta").run(value, key, JSON.stringify(previous));
+      if (Number(r.changes) !== 1) {
+        throw new NyteDeskError(409, `${key} changed; reload and retry`);
+      }
     },
 
     idempotent,

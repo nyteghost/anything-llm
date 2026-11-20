@@ -38,15 +38,31 @@ export default function AttachmentManager({ attachments }) {
 
   return (
     <div className="flex flex-wrap gap-2 mt-2 mb-4">
-      {attachments.filter(a => a.archiveManifest).map(a => (
-        <details key={`manifest-${a.uid}`} className="w-full rounded-lg p-2 bg-theme-attachment-bg text-theme-attachment-text text-xs">
-          <summary className="cursor-pointer">{a.file.name}: {a.archiveSummary?.imported} imported, {a.archiveSummary?.skipped} skipped — import details</summary>
-          <p className="my-2">Imported does not mean reviewed. Use @agent to read source sections and report coverage.</p>
-          <div className="max-h-48 overflow-auto">
-            {a.archiveManifest.map((entry, index) => <p key={index} className="break-all">{entry.path}: {entry.status}{entry.reason ? ` — ${entry.reason}` : ""}</p>)}
-          </div>
-        </details>
-      ))}
+      {attachments
+        .filter((a) => a.archiveManifest)
+        .map((a) => (
+          <details
+            key={`manifest-${a.uid}`}
+            className="w-full rounded-lg p-2 bg-theme-attachment-bg text-theme-attachment-text text-xs"
+          >
+            <summary className="cursor-pointer">
+              {a.file.name}: {a.archiveSummary?.imported} imported,{" "}
+              {a.archiveSummary?.skipped} skipped — import details
+            </summary>
+            <p className="my-2">
+              Imported does not mean reviewed. Use @agent to read source
+              sections and report coverage.
+            </p>
+            <div className="max-h-48 overflow-auto">
+              {a.archiveManifest.map((entry, index) => (
+                <p key={index} className="break-all">
+                  {entry.path}: {entry.status}
+                  {entry.reason ? ` — ${entry.reason}` : ""}
+                </p>
+              ))}
+            </div>
+          </details>
+        ))}
       {attachments.map((attachment) => (
         <AttachmentItem
           key={attachment.uid}
@@ -267,4 +283,3 @@ function displayFromFile(file) {
       return { iconBgColor: "bg-royalblue", Icon: FileText };
   }
 }
-

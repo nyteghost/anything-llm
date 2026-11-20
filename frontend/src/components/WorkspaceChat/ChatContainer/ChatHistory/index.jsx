@@ -50,7 +50,7 @@ export default forwardRef(function (
   const { threadSlug = null } = useParams();
   const { showing, hideModal } = useManageWorkspaceModal();
   const { showScrollbar } = Appearance.getSettings();
-  const { textSizeClass } = useTextSize();
+  const { textSizePx } = useTextSize();
 
   const saveEditedMessage = useCallback(
     async ({
@@ -185,8 +185,9 @@ export default forwardRef(function (
       <ThoughtExpansionProvider>
         <CompletedReplyAnnouncement history={history} />
         <div
-          className={`markdown text-white/80 light:text-theme-text-primary font-light ${textSizeClass} h-full md:h-[83%] pb-[100px] pt-6 md:pt-0 md:pb-20 md:mx-0 overflow-y-scroll flex flex-col items-center justify-start ${showScrollbar ? "show-scrollbar" : "no-scroll"}`}
+          className={`markdown chat-font-scale text-white/80 light:text-theme-text-primary font-light h-full md:h-[83%] pb-[100px] pt-6 md:pt-0 md:pb-20 md:mx-0 overflow-y-scroll flex flex-col items-center justify-start ${showScrollbar ? "show-scrollbar" : "no-scroll"}`}
           id="chat-history"
+          style={{ fontSize: `${textSizePx}px` }}
           ref={chatHistoryRef}
           {...scrollHandlers}
         >

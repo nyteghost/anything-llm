@@ -79,8 +79,8 @@ test("denied and cancelled tasks cannot be executed or resurrected", () => {
 });
 
 test("adapter catalog is planning only and carries no live credentials", () => {
-  assert.deepEqual(listAdapters().map(a => a.id), ["ollama", "strata", "claude-code", "codex", "anthropic", "openai"]);
-  assert.deepEqual(listAdapters().map(a => a.role), ["coordinator", "coordinator", "implementer", "reviewer", "api", "api"]);
+  assert.deepEqual(listAdapters().map(a => a.id), ["ollama", "strata", "polystrata", "claude-code", "codex", "anthropic", "openai"]);
+  assert.deepEqual(listAdapters().map(a => a.role), ["coordinator", "coordinator", "coordinator", "implementer", "reviewer", "api", "api"]);
   assert.ok(listAdapters().every(a => !a.executionEnabled && !a.configured));
 });
 

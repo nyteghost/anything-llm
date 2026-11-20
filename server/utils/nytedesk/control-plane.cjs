@@ -52,6 +52,7 @@ const RISK = Object.freeze(
 const AGENTS = Object.freeze([
   { id: "ollama", role: "coordinator", runtime: "local-api" },
   { id: "strata", role: "coordinator", runtime: "local-api" },
+  { id: "polystrata", role: "coordinator", runtime: "local-api" },
   { id: "claude-code", role: "implementer", runtime: "vm-cli" },
   { id: "codex", role: "reviewer", runtime: "vm-cli" },
   { id: "anthropic", role: "api", runtime: "cloud-api" },
