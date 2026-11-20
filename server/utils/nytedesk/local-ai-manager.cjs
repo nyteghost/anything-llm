@@ -178,12 +178,16 @@ function requestProcessAction() {
 // Model names come from an engine NyteDesk does not control: keep only short
 // printable strings, once each, so a hostile list cannot bloat storage or UI.
 const MODEL_NAME_MAX = 256;
-const PRINTABLE = /^[^\u0000-\u001f\u007f]+$/;
+// No C0 control characters and no DEL.
+const isPrintable = (text) =>
+  [...text].every((ch) => {
+    const code = ch.charCodeAt(0);
+    return code > 0x1f && code !== 0x7f;
+  });
 
 function cleanNames(names) {
   const valid = names.filter(
-    (n) =>
-      typeof n === "string" && n.length <= MODEL_NAME_MAX && PRINTABLE.test(n)
+    (n) => typeof n === "string" && n.length <= MODEL_NAME_MAX && isPrintable(n)
   );
   return [...new Set(valid)];
 }
