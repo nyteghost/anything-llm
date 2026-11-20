@@ -1,112 +1,119 @@
-# NyteDesk — CI remediation and Local AI Manager integration: review handoff
+# NyteDesk PR #6: independent review handoff
 
 - **Branch:** `feature/nytedesk-stabilization-local-ai`
-- **Draft PR:** #6, base `feature/nytedesk-control-plane-phase1` (PR #1)
-- **Code reviewed at:** `f4c452981686087d783e106fcb893e80e0319fd9` (this document and the doc updates come in the next commit; see the PR body for the final head)
-- **Branched from:** PR #1 head `b0173cc`
-- **Author:** Claude (implementation). **Requested reviewer:** Codex CLI or the owner. Claude has not approved its own work.
+- **Draft PR:** #6, base `feature/nytedesk-control-plane-phase1` (PR #1, `b0173cc`)
+- **Code verified at:** `83e73bff230f6d866832bff98388345c87aace34`. The commit that adds this document changes only documentation. The PR body gives the final head.
+- **Author:** Claude (implementation). **Requested reviewer:** Codex CLI or the owner. The author has not approved his own work.
 
-Nothing was merged, deployed or enabled. No inference process, VM, host service or unrelated branch was touched.
+Nothing was merged or deployed. No process control, CLI or VM execution, or AgentBridge dispatch was enabled. Claude did not contact or change the owner's Ollama, PolyStrata, Strata, VM or host.
 
-## 1. What this branch contains
+## 1. Verification levels
 
-| Source | Head merged | Notes |
+| Level | What it covers | Status |
 |---|---|---|
-| PR #5 prompt regression tests | `64f033b` | One remaining failure fixed in `439c1d4`. The test still checks for the source-review safety text; the security instructions are unchanged. |
-| PR #4 roadmap | `098f168` | M3 checkboxes updated. |
-| PR #3 Local AI Manager foundation | `8ec1f3a` | Extended to three engines, with API and UI (`a9b7b09`). |
-| PR #2 chat font slider | `0e7d985` | Fixes for the prompt-size regression, keyboard access and lint (`a9b7b09`). |
-| Lint | — | Prettier and unused-binding fixes in base server files (`f4c4529`). |
+| **Automated, CI** | Lint, Jest backend, fork tests, **production `vite build`** | All pass at `83e73bf` (§3) |
+| **Simulated integration** | Real NyteDesk routes, service, SQLite and probe over HTTP, against **mock engines** on loopback | Pass (fork tests) |
+| **Real browser, harness** | Real headless Chrome running the real `textSize.js` and the real `index.css` chat rules. **Not the AnythingLLM app.** | Pass, in CI and in Claude's sandbox |
+| **Real browser, full app** | AnythingLLM UI, NyteDesk panel, slider in the running app | **Not done** (§5) |
+| **Real hardware or services** | Owner's CachyOS, RTX 3080, live Ollama and PolyStrata | **Not done** (§5) |
 
-PR #1 to PR #5 are still open and unchanged. This branch merges them and does not rewrite any of them.
+## 2. Commits since the previous review (`55518c1`)
 
-## 2. CI evidence (GitHub Actions at `f4c4529`)
+| Commit | Change |
+|---|---|
+| `cd4e06d` | Slider and Local AI Manager defect fixes, with tests (§4) |
+| `921862a` | CI: production frontend build job and real-Chrome harness job. The fork workflow now also runs on NyteDesk server and frontend changes. Owner-authorized: read-only token, no secrets, nothing published |
+| `83e73bf` | Lint: model names are filtered by character code instead of a control-character regex |
 
-| Workflow | Run ID | Result |
+## 3. CI evidence at `83e73bf`
+
+| Workflow, job | Run | Result |
 |---|---|---|
-| Lint (lint-server, lint-frontend) | 44651050932 | success (collector skipped: no collector changes) |
-| Run backend tests (Jest) | 44651050631 | success: 100 suites passed, 1 skipped; **2569 passed, 5 skipped, 0 failed** |
-| Fork focused tests (Node 24) | 44651050836 | success |
-| Build QA GHCR Image | 44651050678 | skipped by the workflow's own conditions |
+| Lint: lint-server, lint-frontend | 44656887300 | success (collector skipped: unchanged) |
+| Run backend tests (Jest) | 44656887375 | success: 100 suites, 1 skipped; **2569 passed, 5 skipped, 0 failed** |
+| Fork focused tests: focused-tests | 44656887257 | success: **100 tests, 100 pass, 0 skipped** |
+| Fork focused tests: **frontend-build** | 44656887257 (job 136025190002) | success: `vite v4.5.3`, 6211 modules, built in 24 s, `dist/_index.html` present. Only the existing upstream chunk-size and peer-dependency warnings |
+| Fork focused tests: browser-harness | 44656887257 (job 136025190386) | success: 5/5 in Chrome |
+| Build QA GHCR Image | 44656887250 | skipped by its own conditions (it publishes images, so it was not used) |
 
-PR #1 at `b0173cc`, before this branch, had **lint and backend tests failing**.
+At `55518c1`, `lint-server` had passed, but the frontend build had never run anywhere.
 
-## 3. Reproduce locally
+## 4. Defects found and fixed
+
+**Text-size slider**
+
+1. **Wrong legacy migration.** A saved "small" mapped to 11px. AnythingLLM's "small" was `text-[12px]`, so it now maps to 12px. Legacy and out-of-range stored values are rewritten once.
+2. **No cross-tab sync.** Other open tabs kept the old size. One `subscribeChatFontSize` helper (local event plus `storage` event) now drives the hook and every control.
+3. **Touch screens.** A tap fired mouse-enter (open) and then click (toggle shut), so the submenu closed at once. Hover now opens only for a mouse pointer, and the click after a hover keeps the menu open.
+4. **Phones.** The submenu flew out to the left by about 190px, past the screen edge on a 375px-wide phone. Below the `md` breakpoint it now opens inline under the row.
+5. **Markdown at large sizes.** Headings, tables and code had fixed sizes, so at 22px an h3 (18px) was smaller than body text. Inside the chat history only (`.chat-font-scale`), they now scale in `em`. At the 14px default the sizes are exactly the old 32, 24, 18, 13 and 14px; this is checked in Chrome. Other markdown surfaces are unchanged.
+
+**Local AI Manager**
+
+6. **Selection rule.** The listing and the route used different checks: the UI showed **Select** for any reachable engine, even with a stale check, a changed endpoint or a missing model. One `selectionBlocker` rule now feeds both, and the listing returns `selectable`, `selectionBlockedReason` and `selected`.
+7. **Bad timestamp passed the freshness test.** A check record with an invalid `checkedAt` produced `NaN > limit` (false) and was accepted. It is now refused.
+8. **Idempotency-key reuse.** The UI kept one key per card, so selecting A, then B, then A again was refused as "key already used for a different request". Keys now rotate after every answered request and are reused only after a network failure.
+9. **Save button.** `CTAButton` calls `onClick()` without the event, so `save` threw on `e.preventDefault()` and only the browser's implicit submit saved. Save is now a real submit button with a busy state.
+10. **Unfiltered model names.** Names from an engine were stored and shown without limits. They are now printable, at most 256 characters each, de-duplicated, and at most 200 names.
+11. **Unclear UI.** The panel now shows:
+    - state labels: reachable, unreachable, not checked, not configured ("stopped" was misleading, since NyteDesk cannot know process state);
+    - a note on what the current role may do;
+    - why Select is unavailable;
+    - a warning when the selected engine is unreachable or was reconfigured;
+    - which endpoint a check covered, the HTTP status, and whether the model is listed;
+    - labels on every field.
+
+    There are still no start, stop, restart, unload or kill controls.
+
+## 5. Not verified (blockers for full acceptance)
+
+1. **The full app in a real browser.** Nobody has looked at the NyteDesk page or the chat slider in the running app (desktop and mobile widths, light and dark themes). Claude could not reach the Unraid VM: its console page uses a self-signed certificate, and the desktop's sandboxed shell would not start.
+2. **Server start against real Prisma.** The Jest test uses the real `validatedRequest` and JWTs, but mocked users, workspaces and settings.
+3. **Live engines.** Probes were tested only against mocks. The workflow test binds its mock PolyStrata to port 40537 when that port is free, but no real engine has been contacted.
+4. **Upstream dead code.** `ChatContainer/TextSizeMenu` and `PromptInput/TextSizeMenu` are imported nowhere, here or upstream. They are kept in sync but never rendered; the live control is the chat settings menu row.
+
+## 6. Reproduce
 
 ```sh
-git fetch origin feature/nytedesk-stabilization-local-ai
-git checkout f4c452981686087d783e106fcb893e80e0319fd9
-
-# Fork tests (Node ≥ 22.5 for node:sqlite; CI uses 24)
-node --test tests/fork/*.test.cjs        # local result: 88 tests, 85 pass, 3 skipped, 0 fail
-
-# Focused suites
-node --test tests/fork/nytedesk-engines.test.cjs tests/fork/local-ai-manager.test.cjs \
-            tests/fork/chat-font-size.test.cjs tests/fork/nytedesk-api.test.cjs
-
-# Backend (Jest), including the real-session NyteDesk endpoint test
-cd server && yarn install && yarn test
-yarn test __tests__/endpoints/nytedesk/nytedesk.test.js
-
-# Lint, as CI runs it
-cd server && yarn lint:check ; cd ../frontend && yarn lint:check
-
-# Production frontend build: NOT run by Claude (see §5)
-cd frontend && yarn install && yarn build
+git checkout 83e73bff230f6d866832bff98388345c87aace34
+node --test tests/fork/*.test.cjs                                   # 100 tests
+node --test tests/fork/nytedesk-engine-workflow.test.cjs            # owner workflow, mock engines
+cd frontend && yarn install --frozen-lockfile && yarn build && cd ..
+cd server && yarn install && yarn test && yarn lint:check && cd ..
+cd frontend && yarn lint:check && cd ..
+# Real-Chrome harness (needs playwright or playwright-core, and Chrome)
+NODE_PATH=<dir>/node_modules CHROME=$(which google-chrome) node tests/browser/chat-font-size.browser.cjs
 ```
 
-The three skipped fork tests need dependencies that are not installed in the sandbox (the same skips as on PR #1).
+## 7. Owner checklist (in the dedicated VM, read-only toward the engines)
 
-## 4. Security properties and the tests that check them
+1. Build and start the fork with `NYTEDESK_ENABLED=true` in multi-user mode, and sign in as an admin.
+2. Go to Settings → NyteDesk → Local AI Engines. Configure PolyStrata with the endpoint where it currently runs (for example `http://127.0.0.1:40537/v1`), model `qwen3.6-35b-a3b-ud-q2_k_xl`, context 32768 and VRAM reserve 1024. Then press **Check**, confirm the model shows as listed, and press **Select**.
+3. Change only the port to a wrong one and save. Selection should be blocked, and the selected-engine warning should appear. Restore the port.
+4. As a manager: Check works, and Configure and Select are not shown. As a default user: the panel is read-only.
+5. Chat slider: move it with the mouse and with the arrow keys, Home and End; press Escape; reload. Open two tabs and change the size in one. Try a phone-width window and a touch device. Check a reply that has headings, a table and a code block at 10px and at 22px.
+6. Confirm Ollama, PolyStrata and AnythingLLM data are unchanged and still running.
 
-| Requirement | Where it is enforced | Test |
-|---|---|---|
-| No process control: never start, stop, restart, unload or kill; no name matching | `processAction` always returns 403; no `child_process`/`kill` in the module | `nytedesk-engines`: denial for every role × action; source scan with comments stripped |
-| Engines are externally owned | `ownership: "external"`, `canStart/canStop: false` | `nytedesk-engines` registry test |
-| Invalid endpoints refused | `parseLoopbackEndpoint`: http, 127.0.0.1/[::1], port ≥ 1024, no credentials/query/fragment/`..` | `nytedesk-engines` invalid-endpoint table |
-| PolyStrata port is not hardcoded; Strata endpoint is not invented | `defaultEndpoint: null` for both | registry and selection tests (the port is changed during the test) |
-| Probe cannot be redirected or flooded | GET only, `agent: false`, no redirect following, timeout, 1 MiB limit | redirect and too-large diagnostics tests |
-| Unauthorized config changes refused | admin only for config and selection; manager/admin for checks | `nytedesk-engines` permissions; Jest test: manager PUT → 403 |
-| Stale or mismatched check cannot select | 15-minute age, same endpoint, model listed | selection tests (stale, endpoint changed, model missing) |
-| Concurrency | CAS on engine `version` and on the selection; idempotency keys | version conflict and idempotent replay tests; the existing two-connection task race test |
-| Real authentication | real `validatedRequest` + JWT | Jest: missing/forged/suspended token → 401 |
-| No self-approval; workspace isolation | `service.cjs` (PR #1) | Jest: self-approval 403, outsider 404; `nytedesk-api` |
-| Stale approvals | 24 h expiry and payload hash checked by `reauthorize` | `nytedesk-api` / `control-plane` (PR #1) |
-| Feature gate | `NYTEDESK_ENABLED=true` and multi-user mode | Jest: disabled 403, single-user 403; `nytedesk-engines` gate test |
-| Model output is untrusted | Selected engine is recorded as coordinator only; no route lets model output change policy | design; covered by the absence of such routes |
-| Secrets never stored | secret-named fields refused for engines and providers | `nytedesk-engines` config test |
+## 8. Readiness assessment
 
-The execution preconditions from PR #1 are unchanged: all are still unverified, and `startTask` is not reachable over HTTP.
+- **Ready for independent code review:** yes. All CI checks pass at `83e73bf`, the production build compiles, and the slider and engine workflows have simulated and harness coverage.
+- **Not ready for acceptance or merge** until the full-app browser check (§5.1) and the owner checklist (§7) are done. Process control remains disabled by design.
 
-## 5. Blockers and what is not verified
+## 9. Recommended next milestone
 
-1. **Frontend production build not run.** The sandbox cannot install npm packages. Evidence instead: CI `lint-frontend` passes, and a TypeScript parser check of the 12 changed frontend files reports no syntax errors. **The owner needs to run `yarn build` in `frontend/`.**
-2. **No visual check of the UI.** The font slider (10–22 px, 14 px default/reset, live updates, keyboard access) and the Local AI Engines panel are covered by unit and source tests, but nobody has looked at them in a browser yet.
-3. **No server start against real Prisma.** The Jest test uses the real auth middleware but mocked users, workspaces and settings.
-4. **No live probe of the owner's engines.** Probes were tested against local stub servers only. Claude did not contact the owner's Ollama or PolyStrata.
+**M3b: owner-verified Local AI Manager.**
 
-## 6. Suggested manual check for the owner (read-only for the engines)
+1. Run the §7 checklist in the VM.
+2. Optionally add a Playwright smoke test of the built app (seeded admin, mock engines) to CI.
+3. Remove or wire up the two unused text-size menus.
 
-1. Build and start the fork with `NYTEDESK_ENABLED=true` in multi-user mode.
-2. As admin, open NyteDesk → Local AI Engines. Configure PolyStrata with the endpoint where it is currently running (for example `http://127.0.0.1:<port>/v1`), model `qwen3.6-35b-a3b-ud-q2_k_xl`, context 32768, VRAM reserve 1024.
-3. Press **Check** and confirm the model is listed. Then press **Select**.
-4. Confirm that Ollama and PolyStrata keep running, and that their settings and AnythingLLM data are unchanged.
-5. In a chat, test the font slider with the mouse and with the keyboard, reload the page, and check that the size is kept.
+Only after that, design **engine lifecycle control** under a separate review. It would need:
 
-## 7. Remaining items before engine start/stop support
-
-None of these are implemented. Each needs owner approval and independent review.
-
-1. A separate, authenticated controller running locally (or VM-local), not the web server, holding the only lifecycle rights.
-2. Allowlisted executables and fixed argument templates. No user-supplied paths, shell or arguments.
-3. Exact process ownership: only processes the controller started (by PID and start time, or a service unit), never by name.
-4. Explicit owner confirmation before touching any independently running service, with "leave it alone" as the default.
-5. Resource limits and a VRAM/RAM budget for switching engines (RTX 3080 10 GB: the model, the 1024 MiB reserve and the other engine cannot all be loaded at once).
-6. Graceful unload, idle behaviour, failure recovery and an emergency stop.
-7. Audit entries for every lifecycle action, in the hash-chained log.
-8. Tests for denial and for ownership mismatch, and an independent review (Codex CLI) before enabling.
-9. A decision on whether lifecycle control runs on the host at all, since the owner's rules keep execution inside the verified VM.
-
-## 8. Not done, by instruction
-
-No merge, deploy, VM reset, host-service change, CLI/VM execution, credential use or paid inference.
+- a separate authenticated controller;
+- allowlisted executables and arguments;
+- exact process ownership (never by name);
+- owner confirmation for externally owned services;
+- an RTX 3080 10 GB VRAM budget;
+- hash-chained audit;
+- denial tests and a Codex review;
+- an owner decision on whether any of it runs outside the VM.
