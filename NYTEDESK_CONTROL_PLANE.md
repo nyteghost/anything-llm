@@ -5,13 +5,45 @@ Base: `feature/archive-source-review`
 
 NyteDesk is a task and approval control plane inside AnythingLLM. In Phase 1 people can propose, review, approve, deny, cancel and audit tasks. **No task is ever executed.** There is no route, UI control or worker that starts a task or calls a model, shell, browser, VM, GitHub or any other network service. The archive source-reading features of the base branch are unchanged.
 
+## Confirmed architecture (owner, 2026-11-19)
+
+| Component | Role | Status in this branch |
+|---|---|---|
+| Local LLM (Ollama / Strata) | **Coordinator.** Plans tasks, delegates work and summarizes results. It may only **recommend**: it never approves, grants itself permissions, bypasses review or authorizes its own requests | Listed as agents `ollama` and `strata`, with role `coordinator`. Endpoint configuration only; no calls are made |
+| AgentBridge | Central orchestration, authorization, task persistence, approvals, evidence and audit | Not yet connected. This branch's store is a **local** approval ledger with the same principles (session identity, CAS, immutable approvals, append-only audit). Linking it to AgentBridge (relay v2 drafts, evidence export) is planned, not implemented |
+| Claude Code CLI | Primary implementation agent, inside the VM | Listed as agent `claude-code` (role `implementer`, runtime `vm-cli`). Not invoked |
+| OpenAI Codex CLI | Independent review, debugging and secondary development, inside the VM | Listed as agent `codex` (role `reviewer`, runtime `vm-cli`). Not invoked |
+| Dedicated VM | Isolated environment for editing, builds, tests and agent execution | No VM access from this branch. Execution is gated on the preconditions below |
+| AnythingLLM fork | NyteDesk's interface and foundation | This branch |
+
+Official CLI and API interfaces are used, not browser automation of chat websites.
+
+**Supervised mode is the only mode.**
+- Every action needs a human decision from a different, authenticated user.
+- Agents are not users. `/nytedesk/status` reports `agentsMayApprove: false`, and every agent reports `mayApprove: false`.
+- Protected actions need an administrator:
+  - `vm.write`, `vm.execute`;
+  - `browser.interact`;
+  - `git.push`, `git.merge`;
+  - `credential.access`, `privilege.change`;
+  - `external.publish`.
+
+**Execution preconditions.** All five must be verified before any execution can be enabled. All are reported **unverified** (`executionPreconditions`), and no code path enables execution:
+1. VM isolation inspected and verified;
+2. folders and resources shared with the host identified and reviewed;
+3. VM snapshots or another recovery mechanism established and tested;
+4. bounded execution, resource limits and emergency cancellation configured;
+5. credentials protected.
+
+The owner has authorized development operations **inside** the dedicated VM, including installing tools and changing VM-local files. Changes to the host computer, shared folders, other devices or network infrastructure are not authorized. This branch performs none of these operations.
+
 ## Implemented in Phase 1
 
 | Part | Where | What it does |
 |---|---|---|
 | State machine | `server/utils/nytedesk/control-plane.cjs` | Pure states and transitions. A SHA-256 payload hash is computed at creation. Approve/deny require the decider to name that hash, and `start` requires the approval to carry it. Tampered task objects are refused. Audit is never silently truncated. |
 | Persistent store | `server/utils/nytedesk/store.cjs` | Separate SQLite database (`node:sqlite`, no new npm dependency) at `STORAGE_DIR/nytedesk/nytedesk.db`. Never touches the AnythingLLM Prisma database. |
-| Authorization | `server/utils/nytedesk/service.cjs` | Role and permission rules (below); provider configuration validation. |
+| Authorization | `server/utils/nytedesk/service.cjs` | Role and permission rules (below), supervised-mode status, agent catalog with roles, provider configuration validation. |
 | HTTP API | `server/utils/nytedesk/routes.cjs`, `server/endpoints/nytedesk.js` | Mounted under `/api/nytedesk`; uses AnythingLLM's `validatedRequest`, session user and `Workspace.getWithUser` / `whereWithUser`. |
 | Dashboard | `frontend/src/pages/NyteDesk`, `frontend/src/models/nytedesk.js` | `/settings/nytedesk` (Settings → Tools → NyteDesk). Shows status, agents, task proposal, pending approvals, task history, task detail with verified audit, and provider configuration. |
 | Tests | `tests/fork/control-plane.test.cjs`, `nytedesk-api.test.cjs`, `nytedesk-frontend.test.cjs` | State machine; real-HTTP integration against the real routes, service and SQLite store with stub authentication; static dashboard checks. |
@@ -28,7 +60,7 @@ Identity comes only from the authenticated AnythingLLM session. No request body 
 
 - **Create a task:** any user with access to the workspace.
 - **View a task or list tasks:** users with access to its workspace. A task in a workspace you cannot access returns 404.
-- **Approve or deny:** a manager or admin with workspace access who is **not the requester**. `vm.write`, `vm.execute`, `browser.interact`, `git.push` and `git.merge` need an **admin**.
+- **Approve or deny:** a manager or admin with workspace access who is **not the requester**. Protected actions (`vm.write`, `vm.execute`, `browser.interact`, `git.push`, `git.merge`, `credential.access`, `privilege.change`, `external.publish`) need an **admin**. Agents can never decide.
 - **Cancel:** the requester, or a manager or admin with workspace access.
 - **Provider configuration:** managers and admins can read it; only admins can change it.
 
@@ -73,6 +105,7 @@ Identity comes only from the authenticated AnythingLLM session. No request body 
 ### Provider configuration
 
 - This is configuration only. Execution stays disabled.
+- It covers the model APIs: `ollama`, `strata`, `anthropic` and `openai`. The Claude Code and Codex CLIs run inside the VM and are configured there, not here.
 - **Keys are never stored.** A request containing `apiKey`, `key`, `token`, `secret`, `password` or similar is rejected. `keyEnv` names an environment variable, which must start with `NYTEDESK_`, that the server owner sets. The API reports only whether it is set.
 - **Ollama and Strata:** the base URL must be an IP literal on loopback, a private network or the tailnet (no host names, so no DNS rebinding). It may not contain credentials, a query or a fragment.
 - **Anthropic and OpenAI:** the base URL is restricted to their official API origins. Configuring them requires `keyEnv`.
@@ -103,9 +136,11 @@ Identity comes only from the authenticated AnythingLLM session. No request body 
 ## Next phases (planned, not implemented)
 
 1. Run the build and the UI on the target machine. Add real-session API tests.
-2. Add an executor role and a worker that calls `reauthorize` and `startTask` inside one transaction. Add prompt-only Ollama/Strata adapters, with cost, time and output limits.
-3. Add Anthropic/OpenAI API adapters, using official APIs only, with opt-in external disclosure.
-4. Add separately deployed, separately authenticated VM and browser workers. Each needs:
+2. Connect the local approval ledger to AgentBridge (relay v2 drafts and evidence export). Record verified execution preconditions as owner-signed evidence.
+3. Add an executor role and a worker that calls `reauthorize` and `startTask` inside one transaction. Add prompt-only Ollama/Strata coordinator adapters (recommendations only), with cost, time and output limits.
+4. Add the Claude Code and Codex CLI runners inside the VM, behind the preconditions, using their official CLIs.
+5. Add Anthropic/OpenAI API adapters, using official APIs only, with opt-in external disclosure.
+6. Add separately deployed, separately authenticated VM and browser workers. Each needs:
    - isolation verified against the host, shared folders and LAN;
    - egress allowlists;
    - an emergency stop;

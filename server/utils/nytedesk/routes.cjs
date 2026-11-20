@@ -1,31 +1,45 @@
 "use strict";
 
 /**
- * NyteDesk HTTP routes (Phase 1), as a factory so they can be mounted on the AnythingLLM API
- * router (server/endpoints/nytedesk.js) and exercised over real HTTP in tests with stub
- * authentication. Every route:
- *   1. runs the injected authentication middleware (AnythingLLM `validatedRequest`);
- *   2. requires NYTEDESK_ENABLED=true, multi-user mode and an authenticated user, because
- *      independent approval needs distinct, verified identities;
+ * NyteDesk HTTP routes, as a factory so they can be mounted on the AnythingLLM
+ * API router (server/endpoints/nytedesk.js) and exercised over real HTTP in
+ * tests with stub authentication. Every route:
+ *   1. runs the injected authentication middleware (`validatedRequest`);
+ *   2. requires NYTEDESK_ENABLED=true, multi-user mode and an authenticated
+ *      user, because independent approval needs distinct, verified identities;
  *   3. resolves workspaces only through the injected, permission-aware lookups.
  * A task in a workspace the user cannot access is reported as 404, never 403.
  * There is no route that starts, runs or executes a task.
  */
 const { NyteDeskError } = require("./store.cjs");
 
-const TASK_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const TASK_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const DISABLED = "NyteDesk is disabled (set NYTEDESK_ENABLED=true)";
+const SINGLE_USER =
+  "NyteDesk requires multi-user mode so that approvals come from a different, authenticated user";
 
 function send(response, out) {
-  if (out.replayed) response.set?.("Idempotent-Replayed", "true") ?? response.setHeader?.("Idempotent-Replayed", "true");
+  if (out.replayed) response.set("Idempotent-Replayed", "true");
   return response.status(out.status).json(out.body);
 }
 
 function body(request) {
   const b = request.body;
-  if (typeof b === "string") {
-    try { return JSON.parse(b); } catch { throw new NyteDeskError(400, "Malformed JSON body"); }
+  if (typeof b !== "string") return b ?? {};
+  try {
+    return JSON.parse(b);
+  } catch {
+    throw new NyteDeskError(400, "Malformed JSON body");
   }
-  return b ?? {};
+}
+
+function fail(response, error) {
+  if (error instanceof NyteDeskError || Number.isInteger(error?.status)) {
+    return response.status(error.status).json({ error: error.message });
+  }
+  console.error("[nytedesk]", error?.message);
+  return response.status(500).json({ error: "NyteDesk internal error" });
 }
 
 function createNyteDeskRoutes(app, deps) {
@@ -34,25 +48,25 @@ function createNyteDeskRoutes(app, deps) {
 
   async function gate(request, response, next) {
     try {
-      if (!deps.enabled()) return response.status(403).json({ error: "NyteDesk is disabled (set NYTEDESK_ENABLED=true)", enabled: false });
-      if (!(await deps.isMultiUser(request, response)))
-        return response.status(403).json({ error: "NyteDesk requires multi-user mode so that approvals come from a different, authenticated user", enabled: true, multiUser: false });
+      if (!deps.enabled()) {
+        return response.status(403).json({ error: DISABLED, enabled: false });
+      }
+      if (!(await deps.isMultiUser(request, response))) {
+        const out = { error: SINGLE_USER, enabled: true, multiUser: false };
+        return response.status(403).json(out);
+      }
       const user = await deps.currentUser(request, response);
-      if (!user || !Number.isSafeInteger(Number(user.id)) || user.suspended)
-        return response.status(401).json({ error: "An authenticated user is required" });
+      if (!user || !Number.isSafeInteger(Number(user.id)) || user.suspended) {
+        const out = { error: "An authenticated user is required" };
+        return response.status(401).json(out);
+      }
       response.locals = response.locals || {};
-      response.locals.nytedeskActor = { id: Number(user.id), role: String(user.role), user };
+      const actor = { id: Number(user.id), role: String(user.role), user };
+      response.locals.nytedeskActor = actor;
       return next();
     } catch (error) {
       return fail(response, error);
     }
-  }
-
-  function fail(response, error) {
-    if (error instanceof NyteDeskError || Number.isInteger(error?.status))
-      return response.status(error.status).json({ error: error.message });
-    console.error("[nytedesk]", error?.message);
-    return response.status(500).json({ error: "NyteDesk internal error" });
   }
 
   function handler(fn) {
@@ -81,66 +95,133 @@ function createNyteDeskRoutes(app, deps) {
     return task;
   }
 
+  const key = (request) => request.header("Idempotency-Key");
   const mw = [...auth, gate];
 
-  app.get("/nytedesk/status", [...auth, async (request, response) => {
-    try {
-      const multiUser = await deps.isMultiUser(request, response);
-      return response.status(200).json({ enabled: deps.enabled(), multiUser, ...(deps.enabled() ? deps.service().status() : { executionEnabled: false }) });
-    } catch (error) {
-      return fail(response, error);
-    }
-  }]);
+  app.get("/nytedesk/status", [
+    ...auth,
+    async (request, response) => {
+      try {
+        const enabled = deps.enabled();
+        const multiUser = await deps.isMultiUser(request, response);
+        const extra = enabled
+          ? deps.service().status()
+          : { executionEnabled: false };
+        return response.status(200).json({ enabled, multiUser, ...extra });
+      } catch (error) {
+        return fail(response, error);
+      }
+    },
+  ]);
 
-  app.get("/nytedesk/agents", mw, handler(async (_req, res) => {
-    res.status(200).json({ agents: deps.service().agents() });
-  }));
+  app.get(
+    "/nytedesk/agents",
+    mw,
+    handler(async (_req, res) => {
+      res.status(200).json({ agents: deps.service().agents() });
+    })
+  );
 
-  app.get("/nytedesk/workspaces", mw, handler(async (_req, res, actor) => {
-    const list = await deps.accessibleWorkspaces(actor.user);
-    res.status(200).json({ workspaces: (list || []).map((w) => ({ id: Number(w.id), slug: w.slug, name: w.name })) });
-  }));
+  app.get(
+    "/nytedesk/workspaces",
+    mw,
+    handler(async (_req, res, actor) => {
+      const list = await deps.accessibleWorkspaces(actor.user);
+      const workspaces = (list || []).map((w) => ({
+        id: Number(w.id),
+        slug: w.slug,
+        name: w.name,
+      }));
+      res.status(200).json({ workspaces });
+    })
+  );
 
-  app.get("/nytedesk/tasks", mw, handler(async (req, res, actor) => {
-    let ids = await accessibleIds(actor);
-    if (req.query?.workspace) {
-      const ws = await deps.workspaceBySlug(actor.user, String(req.query.workspace));
-      ids = ws ? [Number(ws.id)] : [];
-    }
-    res.status(200).json({ tasks: deps.service().listTasks(actor, ids, { status: req.query?.status, limit: req.query?.limit }) });
-  }));
+  app.get(
+    "/nytedesk/tasks",
+    mw,
+    handler(async (req, res, actor) => {
+      let ids = await accessibleIds(actor);
+      if (req.query?.workspace) {
+        const slug = String(req.query.workspace);
+        const ws = await deps.workspaceBySlug(actor.user, slug);
+        ids = ws ? [Number(ws.id)] : [];
+      }
+      const filters = { status: req.query?.status, limit: req.query?.limit };
+      const tasks = deps.service().listTasks(actor, ids, filters);
+      res.status(200).json({ tasks });
+    })
+  );
 
-  app.get("/nytedesk/approvals", mw, handler(async (_req, res, actor) => {
-    res.status(200).json({ approvals: deps.service().pendingApprovals(actor, await accessibleIds(actor)) });
-  }));
+  app.get(
+    "/nytedesk/approvals",
+    mw,
+    handler(async (_req, res, actor) => {
+      const ids = await accessibleIds(actor);
+      const approvals = deps.service().pendingApprovals(actor, ids);
+      res.status(200).json({ approvals });
+    })
+  );
 
-  app.post("/nytedesk/workspaces/:slug/tasks", mw, handler(async (req, res, actor) => {
-    const ws = await deps.workspaceBySlug(actor.user, String(req.params.slug));
-    if (!ws) throw new NyteDeskError(404, "Workspace not found");
-    send(res, deps.service().createTask(actor, { id: Number(ws.id), slug: ws.slug }, body(req), req.header("Idempotency-Key")));
-  }));
+  app.post(
+    "/nytedesk/workspaces/:slug/tasks",
+    mw,
+    handler(async (req, res, actor) => {
+      const slug = String(req.params.slug);
+      const ws = await deps.workspaceBySlug(actor.user, slug);
+      if (!ws) throw new NyteDeskError(404, "Workspace not found");
+      const workspace = { id: Number(ws.id), slug: ws.slug };
+      const svc = deps.service();
+      send(res, svc.createTask(actor, workspace, body(req), key(req)));
+    })
+  );
 
-  app.get("/nytedesk/tasks/:id", mw, handler(async (req, res, actor) => {
-    res.status(200).json(deps.service().getTask(actor, await taskFor(req, actor)));
-  }));
+  app.get(
+    "/nytedesk/tasks/:id",
+    mw,
+    handler(async (req, res, actor) => {
+      const task = await taskFor(req, actor);
+      res.status(200).json(deps.service().getTask(actor, task));
+    })
+  );
 
   for (const decision of ["approve", "deny"]) {
-    app.post(`/nytedesk/tasks/:id/${decision}`, mw, handler(async (req, res, actor) => {
-      send(res, deps.service().decide(actor, await taskFor(req, actor), decision, body(req), req.header("Idempotency-Key")));
-    }));
+    app.post(
+      `/nytedesk/tasks/:id/${decision}`,
+      mw,
+      handler(async (req, res, actor) => {
+        const task = await taskFor(req, actor);
+        const svc = deps.service();
+        send(res, svc.decide(actor, task, decision, body(req), key(req)));
+      })
+    );
   }
 
-  app.post("/nytedesk/tasks/:id/cancel", mw, handler(async (req, res, actor) => {
-    send(res, deps.service().cancel(actor, await taskFor(req, actor), body(req), req.header("Idempotency-Key")));
-  }));
+  app.post(
+    "/nytedesk/tasks/:id/cancel",
+    mw,
+    handler(async (req, res, actor) => {
+      const task = await taskFor(req, actor);
+      send(res, deps.service().cancel(actor, task, body(req), key(req)));
+    })
+  );
 
-  app.get("/nytedesk/providers", mw, handler(async (_req, res, actor) => {
-    res.status(200).json({ providers: deps.service().providers(actor) });
-  }));
+  app.get(
+    "/nytedesk/providers",
+    mw,
+    handler(async (_req, res, actor) => {
+      res.status(200).json({ providers: deps.service().providers(actor) });
+    })
+  );
 
-  app.put("/nytedesk/providers/:id", mw, handler(async (req, res, actor) => {
-    send(res, deps.service().putProvider(actor, String(req.params.id), body(req), req.header("Idempotency-Key")));
-  }));
+  app.put(
+    "/nytedesk/providers/:id",
+    mw,
+    handler(async (req, res, actor) => {
+      const id = String(req.params.id);
+      const svc = deps.service();
+      send(res, svc.putProvider(actor, id, body(req), key(req)));
+    })
+  );
 }
 
 module.exports = { createNyteDeskRoutes, TASK_ID_RE };

@@ -353,7 +353,7 @@ test("providers: role checks, no stored secrets, local endpoints as IP literals,
   assert.equal((await call("GET", "/nytedesk/providers", { user: 3 })).status, 403);
   const list = await call("GET", "/nytedesk/providers", { user: 2 });
   assert.equal(list.status, 200);
-  assert.deepEqual(list.body.providers.map((p) => p.id), ["anthropic", "openai", "ollama", "strata"]);
+  assert.deepEqual(list.body.providers.map((p) => p.id), ["ollama", "strata", "anthropic", "openai"]);
   const put = (user, id, body) => call("PUT", `/nytedesk/providers/${id}`, { user, key: newKey(), body });
   assert.equal((await put(2, "ollama", { baseUrl: "http://127.0.0.1:11434", expectedVersion: 0 })).status, 403);
   const secret = await put(1, "openai", { apiKey: "sk-live", expectedVersion: 0 });
@@ -379,10 +379,49 @@ test("providers: role checks, no stored secrets, local endpoints as IP literals,
   assert.ok(agents.body.agents.every((a) => a.executionEnabled === false));
   assert.equal(agents.body.agents.find((a) => a.id === "ollama").configured, true);
   assert.equal((await put(1, "shell", { expectedVersion: 0 })).status, 404);
+  // the CLI agents run inside the VM; they have no endpoint configuration here
+  assert.equal((await put(1, "claude-code", { expectedVersion: 0 })).status, 404);
+  assert.equal((await put(1, "codex", { expectedVersion: 0 })).status, 404);
 });
 
 test("the task store never touches the AnythingLLM database", () => {
   assert.equal(path.basename(store.file), "nytedesk.db");
   const tables = store._db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all().map((r) => r.name);
   assert.deepEqual(tables, ["audit", "decisions", "idempotency", "meta", "providers", "tasks"]);
+});
+
+test("supervised mode: agents are listed with roles and can never approve or execute", async () => {
+  const s = await call("GET", "/nytedesk/status", { user: 3 });
+  assert.equal(s.body.mode, "supervised");
+  assert.equal(s.body.agentsMayApprove, false);
+  assert.equal(s.body.executionEnabled, false);
+  assert.deepEqual(s.body.executionPreconditions.map((p) => p.verified), [false, false, false, false, false]);
+  const a = await call("GET", "/nytedesk/agents", { user: 3 });
+  const byId = Object.fromEntries(a.body.agents.map((x) => [x.id, x]));
+  assert.equal(byId.ollama.role, "coordinator");
+  assert.equal(byId.strata.role, "coordinator");
+  assert.equal(byId["claude-code"].role, "implementer");
+  assert.equal(byId["claude-code"].runtime, "vm-cli");
+  assert.equal(byId.codex.role, "reviewer");
+  assert.ok(a.body.agents.every((x) => x.mayApprove === false && x.executionEnabled === false));
+});
+
+test("protected actions (credentials, privileges, publication) need an administrator", async () => {
+  for (const action of [ACTIONS.CREDENTIAL_ACCESS, ACTIONS.PRIVILEGE_CHANGE, ACTIONS.EXTERNAL_PUBLISH]) {
+    const t = await createTask(3, { action, adapter: "claude-code", description: `protected ${action}` });
+    const m = await decide(2, t, "approve");
+    assert.equal(m.status, 403, action);
+    const d = await call("GET", `/nytedesk/tasks/${t.id}`, { user: 1 });
+    assert.equal(d.body.protected, true);
+    assert.equal((await decide(1, t, "approve")).status, 200);
+  }
+});
+
+test("a task proposed for the coordinator is still decided only by a human session", async () => {
+  // The local LLM may recommend work; the request is stored like any other and needs a
+  // different human with the right role. There is no agent identity that can decide.
+  const t = await createTask(3, { adapter: "ollama", description: "Coordinator plan: delegate review to codex" });
+  assert.equal(t.status, "waiting_approval");
+  assert.equal((await decide(3, t, "approve")).status, 403);
+  assert.equal((await decide(2, t, "approve")).status, 200);
 });

@@ -1,26 +1,28 @@
 "use strict";
 
 /**
- * NyteDesk persistent task and audit store (Phase 1).
+ * NyteDesk persistent task and audit store.
  *
  * A separate SQLite database (node:sqlite, no npm dependency) in
  * STORAGE_DIR/nytedesk/nytedesk.db. It never opens, migrates or writes the
  * AnythingLLM Prisma database or any user data.
  *
  * Guarantees, each enforced in SQL as well as in code:
- * - Atomic transitions: every change runs in BEGIN IMMEDIATE and updates the task with a
- *   compare-and-swap on its version (`WHERE id = ? AND version = ?`). A lost race changes
- *   nothing and reports 409.
- * - Immutable payload: triggers reject any UPDATE of a task's payload columns or DELETE of a task.
- * - Immutable approval binding: an approval records the payload hash it was given, the decision
- *   ID and an expiry. Once set, triggers reject changing it. One decision per task (UNIQUE).
- * - Replay protection: decision IDs are server-generated and unique; a decided task cannot be
- *   decided again; idempotency keys return the stored result for the same request and refuse
- *   a different request under the same key.
- * - Audit: append-only (triggers reject UPDATE and DELETE), SHA-256 hash-chained per task,
- *   with continuity checked against the task version.
+ * - Atomic transitions: every change runs in BEGIN IMMEDIATE and updates the
+ *   task with a compare-and-swap on its version. A lost race changes nothing
+ *   and reports 409.
+ * - Immutable payload: triggers reject any UPDATE of a task's payload columns
+ *   and any DELETE of a task.
+ * - Immutable approval binding: an approval records the payload hash it was
+ *   given, the decision ID and an expiry. Once set, triggers reject changing
+ *   it. One decision per task (UNIQUE).
+ * - Replay protection: decision IDs are server-generated and unique; a decided
+ *   task cannot be decided again; idempotency keys return the stored result
+ *   for the same request and refuse a different request under the same key.
+ * - Audit: append-only (triggers reject UPDATE and DELETE), SHA-256
+ *   hash-chained per task, continuity checked against the task version.
  *
- * Execution is not available in Phase 1: `start` refuses unless the caller passes
+ * Execution is not available: `startTask` refuses unless the caller passes
  * `executionEnabled: true`, which no HTTP route does.
  */
 const crypto = require("node:crypto");
@@ -31,6 +33,7 @@ const cp = require("./control-plane.cjs");
 const ZERO = "0".repeat(64);
 const DEFAULT_APPROVAL_TTL_MS = 24 * 60 * 60 * 1000;
 const IDEMPOTENCY_KEY_RE = /^[A-Za-z0-9_.:-]{8,128}$/;
+const MAX_AUDIT_EVENTS = 128;
 
 class NyteDeskError extends Error {
   constructor(status, message) {
@@ -44,21 +47,22 @@ function sha256(text) {
 }
 
 function loadSqlite() {
+  // Suppress only the experimental-feature warning node:sqlite emits on Node 22.
+  const original = process.emitWarning;
+  process.emitWarning = (warning, ...rest) => {
+    const text = typeof warning === "string" ? warning : warning?.message;
+    if (/SQLite is an experimental feature/.test(String(text))) return;
+    return original.call(process, warning, ...rest);
+  };
   try {
-    // Suppress only the one experimental-feature warning node:sqlite emits on Node 22.
-    const original = process.emitWarning;
-    process.emitWarning = (warning, ...rest) => {
-      const text = typeof warning === "string" ? warning : warning?.message;
-      if (/SQLite is an experimental feature/.test(String(text))) return;
-      return original.call(process, warning, ...rest);
-    };
-    try {
-      return require("node:sqlite");
-    } finally {
-      process.emitWarning = original;
-    }
+    return require("node:sqlite");
   } catch {
-    throw new NyteDeskError(503, "NyteDesk storage needs Node.js with node:sqlite (Node 22.5 or later)");
+    throw new NyteDeskError(
+      503,
+      "NyteDesk storage needs Node.js with node:sqlite (Node 22.5 or later)"
+    );
+  } finally {
+    process.emitWarning = original;
   }
 }
 
@@ -84,7 +88,8 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS tasks_workspace ON tasks (workspace_id, created_at);
 CREATE INDEX IF NOT EXISTS tasks_status ON tasks (status);
 CREATE TRIGGER IF NOT EXISTS tasks_payload_immutable
-  BEFORE UPDATE OF id, workspace_id, workspace_slug, requester_id, adapter, action, description, payload_hash, created_at ON tasks
+  BEFORE UPDATE OF id, workspace_id, workspace_slug, requester_id, adapter,
+    action, description, payload_hash, created_at ON tasks
   BEGIN SELECT RAISE(ABORT, 'nytedesk: task payload is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS tasks_approval_immutable
   BEFORE UPDATE OF approval_json ON tasks WHEN OLD.approval_json IS NOT NULL
@@ -140,6 +145,39 @@ CREATE TABLE IF NOT EXISTS providers (
 );
 `;
 
+const SQL = Object.freeze({
+  task: "SELECT * FROM tasks WHERE id = ?",
+  insertTask: `INSERT INTO tasks (id, workspace_id, workspace_slug,
+    requester_id, adapter, action, description, payload_hash, status, version,
+    approval_json, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
+  casTask: `UPDATE tasks SET status = ?, version = ?, updated_at = ?
+    WHERE id = ? AND version = ?`,
+  casTaskApproval: `UPDATE tasks SET status = ?, version = ?, updated_at = ?,
+    approval_json = ? WHERE id = ? AND version = ?`,
+  lastAudit: `SELECT sequence, hash FROM audit WHERE task_id = ?
+    ORDER BY sequence DESC LIMIT 1`,
+  countAudit: "SELECT COUNT(*) AS n FROM audit WHERE task_id = ?",
+  insertAudit: `INSERT INTO audit (task_id, sequence, event, actor_id,
+    actor_role, at, detail_json, prev_hash, hash)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  audit: "SELECT * FROM audit WHERE task_id = ? ORDER BY sequence",
+  insertDecision: `INSERT INTO decisions (decision_id, task_id, actor_id,
+    decision, payload_hash, at) VALUES (?, ?, ?, ?, ?, ?)`,
+  decision: "SELECT * FROM decisions WHERE task_id = ?",
+  idempotency: `SELECT request_hash, status, response_json FROM idempotency
+    WHERE actor_id = ? AND key = ?`,
+  insertIdempotency: `INSERT INTO idempotency (actor_id, key, request_hash,
+    status, response_json, at) VALUES (?, ?, ?, ?, ?, ?)`,
+  providers: "SELECT * FROM providers ORDER BY id",
+  providerVersion: "SELECT version FROM providers WHERE id = ?",
+  updateProvider: `UPDATE providers SET kind = ?, base_url = ?, model = ?,
+    key_env = ?, version = ?, updated_by = ?, updated_at = ?
+    WHERE id = ? AND version = ?`,
+  insertProvider: `INSERT INTO providers (id, kind, base_url, model, key_env,
+    version, updated_by, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+});
+
 function defaultFile() {
   const root = process.env.STORAGE_DIR
     ? path.resolve(process.env.STORAGE_DIR)
@@ -166,7 +204,7 @@ function rowToTask(row) {
   };
 }
 
-/** The pure state-machine view of a stored task (identities as strings, as control-plane uses). */
+/** The pure state-machine view of a stored task (identities as strings). */
 function toMachine(task) {
   return {
     id: task.id,
@@ -185,23 +223,50 @@ function toMachine(task) {
   };
 }
 
-function auditHash(entry) {
-  return sha256(cp.canonical({
-    task_id: entry.task_id, sequence: entry.sequence, event: entry.event, actor_id: entry.actor_id,
-    actor_role: entry.actor_role, at: entry.at, detail: JSON.parse(entry.detail_json), prev_hash: entry.prev_hash,
-  }));
+function auditHash(row) {
+  const entry = {
+    task_id: row.task_id,
+    sequence: Number(row.sequence),
+    event: row.event,
+    actor_id: Number(row.actor_id),
+    actor_role: row.actor_role,
+    at: row.at,
+    detail: JSON.parse(row.detail_json),
+    prev_hash: row.prev_hash,
+  };
+  return sha256(cp.canonical(entry));
+}
+
+function genesis(taskId) {
+  return sha256(`${ZERO}:${taskId}`);
+}
+
+function clip(text) {
+  return typeof text === "string" ? text.slice(0, 1000) : null;
+}
+
+function mapError(error) {
+  const message = error.message;
+  if (/Stale task version/.test(message)) {
+    return new NyteDeskError(409, "Stale task version; reload and retry");
+  }
+  if (/self-approve/.test(message)) return new NyteDeskError(403, message);
+  return new NyteDeskError(409, message);
 }
 
 function openStore(options = {}) {
   const { DatabaseSync } = loadSqlite();
   const file = options.file ?? defaultFile();
-  if (file !== ":memory:") fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  if (file !== ":memory:") {
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  }
   const db = new DatabaseSync(file);
   db.exec("PRAGMA busy_timeout = 5000;");
   db.exec(SCHEMA);
   const now = options.now ?? (() => new Date().toISOString());
   const uuid = options.uuid ?? crypto.randomUUID;
   const ttl = options.approvalTtlMs ?? DEFAULT_APPROVAL_TTL_MS;
+  const sql = (name) => db.prepare(SQL[name]);
 
   function tx(fn) {
     db.exec("BEGIN IMMEDIATE");
@@ -210,71 +275,120 @@ function openStore(options = {}) {
       db.exec("COMMIT");
       return out;
     } catch (error) {
-      try { db.exec("ROLLBACK"); } catch {}
+      try {
+        db.exec("ROLLBACK");
+      } catch {}
       throw error;
     }
   }
 
   function getTaskRow(id) {
-    return db.prepare("SELECT * FROM tasks WHERE id = ?").get(String(id));
+    return sql("task").get(String(id));
   }
 
   function appendAudit(taskId, sequence, event, actor, at, detail = {}) {
-    const last = db.prepare("SELECT sequence, hash FROM audit WHERE task_id = ? ORDER BY sequence DESC LIMIT 1").get(taskId);
-    if ((last ? Number(last.sequence) + 1 : 1) !== sequence)
+    const last = sql("lastAudit").get(taskId);
+    const expected = last ? Number(last.sequence) + 1 : 1;
+    if (expected !== sequence) {
       throw new NyteDeskError(409, "Audit sequence is not continuous");
-    const count = Number(db.prepare("SELECT COUNT(*) AS n FROM audit WHERE task_id = ?").get(taskId).n);
-    if (count >= 128) throw new NyteDeskError(409, "Task audit capacity reached");
-    const entry = {
-      task_id: taskId, sequence, event, actor_id: Number(actor.id), actor_role: String(actor.role),
-      at, detail_json: JSON.stringify(detail), prev_hash: last ? last.hash : sha256(`${ZERO}:${taskId}`),
+    }
+    const count = Number(sql("countAudit").get(taskId).n);
+    if (count >= MAX_AUDIT_EVENTS) {
+      throw new NyteDeskError(409, "Task audit capacity reached");
+    }
+    const row = {
+      task_id: taskId,
+      sequence,
+      event,
+      actor_id: Number(actor.id),
+      actor_role: String(actor.role),
+      at,
+      detail_json: JSON.stringify(detail),
+      prev_hash: last ? last.hash : genesis(taskId),
     };
-    entry.hash = auditHash(entry);
-    db.prepare(`INSERT INTO audit (task_id, sequence, event, actor_id, actor_role, at, detail_json, prev_hash, hash)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(entry.task_id, entry.sequence, entry.event, entry.actor_id,
-      entry.actor_role, entry.at, entry.detail_json, entry.prev_hash, entry.hash);
+    row.hash = auditHash(row);
+    sql("insertAudit").run(
+      row.task_id,
+      row.sequence,
+      row.event,
+      row.actor_id,
+      row.actor_role,
+      row.at,
+      row.detail_json,
+      row.prev_hash,
+      row.hash
+    );
   }
 
   /** Compare-and-swap the mutable task columns. Exactly one row must change. */
   function casUpdate(task, next, approvalJson) {
-    const result = approvalJson === undefined
-      ? db.prepare("UPDATE tasks SET status = ?, version = ?, updated_at = ? WHERE id = ? AND version = ?")
-        .run(next.status, next.nextSequence, next.updatedAt, task.id, task.version)
-      : db.prepare("UPDATE tasks SET status = ?, version = ?, updated_at = ?, approval_json = ? WHERE id = ? AND version = ?")
-        .run(next.status, next.nextSequence, next.updatedAt, approvalJson, task.id, task.version);
-    if (Number(result.changes) !== 1) throw new NyteDeskError(409, "Task changed concurrently; reload and retry");
+    const values = [next.status, next.nextSequence, next.updatedAt];
+    const result =
+      approvalJson === undefined
+        ? sql("casTask").run(...values, task.id, task.version)
+        : sql("casTaskApproval").run(
+            ...values,
+            approvalJson,
+            task.id,
+            task.version
+          );
+    if (Number(result.changes) !== 1) {
+      throw new NyteDeskError(
+        409,
+        "Task changed concurrently; reload and retry"
+      );
+    }
   }
 
   function machineTransition(task, args) {
     try {
       return cp.transition(toMachine(task), args, { now });
     } catch (error) {
-      if (/Stale task version/.test(error.message)) throw new NyteDeskError(409, "Stale task version; reload and retry");
-      if (/self-approve/.test(error.message)) throw new NyteDeskError(403, error.message);
-      if (/does not match/.test(error.message)) throw new NyteDeskError(409, error.message);
-      throw new NyteDeskError(409, error.message);
+      throw mapError(error);
     }
   }
 
+  function requireTask(id) {
+    const task = rowToTask(getTaskRow(id));
+    if (!task) throw new NyteDeskError(404, "Task not found");
+    return task;
+  }
+
   /**
-   * Run `fn` inside one transaction with idempotency. A stored result for (actor, key) with the same
-   * request hash is returned unchanged (replayed: true); a different request under the same key is 409.
-   * Only successful results are stored, so a refused request can be corrected and retried.
+   * Run `fn` inside one transaction with idempotency. A stored result for
+   * (actor, key) with the same request hash is returned unchanged
+   * (replayed: true); a different request under the same key is 409. Only
+   * successful results are stored, so a refused request can be corrected and
+   * retried.
    */
   function idempotent(actorId, key, requestHash, fn) {
-    if (typeof key !== "string" || !IDEMPOTENCY_KEY_RE.test(key))
-      throw new NyteDeskError(400, "An Idempotency-Key header (8-128 of A-Z a-z 0-9 _ . : -) is required");
+    if (typeof key !== "string" || !IDEMPOTENCY_KEY_RE.test(key)) {
+      throw new NyteDeskError(
+        400,
+        "An Idempotency-Key header (8-128 of A-Z a-z 0-9 _ . : -) is required"
+      );
+    }
     return tx(() => {
-      const prior = db.prepare("SELECT request_hash, status, response_json FROM idempotency WHERE actor_id = ? AND key = ?")
-        .get(Number(actorId), key);
+      const prior = sql("idempotency").get(Number(actorId), key);
       if (prior) {
-        if (prior.request_hash !== requestHash)
-          throw new NyteDeskError(409, "Idempotency-Key was already used for a different request");
-        return { status: Number(prior.status), body: JSON.parse(prior.response_json), replayed: true };
+        if (prior.request_hash !== requestHash) {
+          throw new NyteDeskError(
+            409,
+            "Idempotency-Key was already used for a different request"
+          );
+        }
+        const body = JSON.parse(prior.response_json);
+        return { status: Number(prior.status), body, replayed: true };
       }
       const out = fn();
-      db.prepare("INSERT INTO idempotency (actor_id, key, request_hash, status, response_json, at) VALUES (?, ?, ?, ?, ?, ?)")
-        .run(Number(actorId), key, requestHash, out.status, JSON.stringify(out.body), now());
+      sql("insertIdempotency").run(
+        Number(actorId),
+        key,
+        requestHash,
+        out.status,
+        JSON.stringify(out.body),
+        now()
+      );
       return { ...out, replayed: false };
     });
   }
@@ -283,93 +397,167 @@ function openStore(options = {}) {
     file,
     NyteDeskError,
 
-    /** Inside a transaction: create a task (status waiting_approval) and its first audit event. */
+    /** Inside a transaction: create a waiting task and its first audit event. */
     insertTask({ workspace, actor, description, adapter, action }) {
       let machine;
       try {
-        machine = cp.createTask({
-          workspaceId: String(workspace.id), requesterId: String(actor.id), description, adapter, action,
-        }, { now, uuid });
+        const fields = {
+          workspaceId: String(workspace.id),
+          requesterId: String(actor.id),
+          description,
+          adapter,
+          action,
+        };
+        machine = cp.createTask(fields, { now, uuid });
       } catch (error) {
         throw new NyteDeskError(400, error.message);
       }
-      db.prepare(`INSERT INTO tasks (id, workspace_id, workspace_slug, requester_id, adapter, action, description,
-        payload_hash, status, version, approval_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`)
-        .run(machine.id, Number(workspace.id), String(workspace.slug), Number(actor.id), adapter, action, description,
-          machine.payloadHash, machine.status, machine.nextSequence, machine.createdAt, machine.updatedAt);
-      appendAudit(machine.id, 1, "task.created", actor, machine.createdAt, { adapter, action, payloadHash: machine.payloadHash });
+      sql("insertTask").run(
+        machine.id,
+        Number(workspace.id),
+        String(workspace.slug),
+        Number(actor.id),
+        adapter,
+        action,
+        description,
+        machine.payloadHash,
+        machine.status,
+        machine.nextSequence,
+        machine.createdAt,
+        machine.updatedAt
+      );
+      const detail = { adapter, action, payloadHash: machine.payloadHash };
+      const at = machine.createdAt;
+      appendAudit(machine.id, 1, "task.created", actor, at, detail);
       return rowToTask(getTaskRow(machine.id));
     },
 
-    /** Inside a transaction: approve or deny, bound to the payload hash the decider supplies. */
+    /** Inside a transaction: approve or deny, bound to the named payload hash. */
     decideTask(id, actor, { decision, expectedVersion, payloadHash, reason }) {
-      const task = rowToTask(getTaskRow(id));
-      if (!task) throw new NyteDeskError(404, "Task not found");
-      if (!["approve", "deny"].includes(decision)) throw new NyteDeskError(400, "Unknown decision");
+      const task = requireTask(id);
+      if (!["approve", "deny"].includes(decision)) {
+        throw new NyteDeskError(400, "Unknown decision");
+      }
       const decisionId = uuid();
       const next = machineTransition(task, {
-        operation: decision, actorId: String(actor.id), expectedSequence: expectedVersion, decisionId,
+        operation: decision,
+        actorId: String(actor.id),
+        expectedSequence: expectedVersion,
+        decisionId,
         approvedPayloadHash: payloadHash,
       });
       const at = next.updatedAt;
+      const expiresAt =
+        decision === "approve"
+          ? new Date(Date.parse(at) + ttl).toISOString()
+          : null;
       const approval = {
-        decisionId, decision, by: Number(actor.id), role: String(actor.role), payloadHash: task.payloadHash, at,
-        expiresAt: decision === "approve" ? new Date(Date.parse(at) + ttl).toISOString() : null,
-        reason: typeof reason === "string" ? reason.slice(0, 1000) : null,
+        decisionId,
+        decision,
+        by: Number(actor.id),
+        role: String(actor.role),
+        payloadHash: task.payloadHash,
+        at,
+        expiresAt,
+        reason: clip(reason),
       };
       casUpdate(task, next, JSON.stringify(approval));
-      db.prepare("INSERT INTO decisions (decision_id, task_id, actor_id, decision, payload_hash, at) VALUES (?, ?, ?, ?, ?, ?)")
-        .run(decisionId, task.id, Number(actor.id), decision, task.payloadHash, at);
-      appendAudit(task.id, task.version, `task.${decision}`, actor, at, { decisionId, payloadHash: task.payloadHash, reason: approval.reason });
+      sql("insertDecision").run(
+        decisionId,
+        task.id,
+        Number(actor.id),
+        decision,
+        task.payloadHash,
+        at
+      );
+      const detail = {
+        decisionId,
+        payloadHash: task.payloadHash,
+        reason: approval.reason,
+      };
+      appendAudit(task.id, task.version, `task.${decision}`, actor, at, detail);
       return rowToTask(getTaskRow(task.id));
     },
 
     /** Inside a transaction: cancel a waiting, approved or running task. */
     cancelTask(id, actor, { expectedVersion, reason }) {
-      const task = rowToTask(getTaskRow(id));
-      if (!task) throw new NyteDeskError(404, "Task not found");
-      const next = machineTransition(task, { operation: "cancel", actorId: String(actor.id), expectedSequence: expectedVersion });
+      const task = requireTask(id);
+      const next = machineTransition(task, {
+        operation: "cancel",
+        actorId: String(actor.id),
+        expectedSequence: expectedVersion,
+      });
       casUpdate(task, next);
-      appendAudit(task.id, task.version, "task.cancel", actor, next.updatedAt,
-        { reason: typeof reason === "string" ? reason.slice(0, 1000) : null });
+      const detail = { reason: clip(reason) };
+      const at = next.updatedAt;
+      appendAudit(task.id, task.version, "task.cancel", actor, at, detail);
       return rowToTask(getTaskRow(task.id));
     },
 
     /**
-     * Re-check, immediately before any execution, everything an approval depends on. Phase 1 has no
-     * executor; this is the contract a future worker must call inside the same transaction as `start`.
+     * Re-check, immediately before any execution, everything an approval
+     * depends on. There is no executor yet; this is the contract a future
+     * worker must call inside the same transaction as `startTask`.
      */
     reauthorize(id) {
       const problems = [];
       const task = rowToTask(getTaskRow(id));
       if (!task) return { ok: false, problems: ["task not found"] };
-      if (task.status !== cp.STATES.APPROVED) problems.push(`status is ${task.status}, not approved`);
+      if (task.status !== cp.STATES.APPROVED) {
+        problems.push(`status is ${task.status}, not approved`);
+      }
       const a = task.approval;
-      if (!a || a.decision !== "approve") problems.push("no approval");
-      else {
+      if (!a || a.decision !== "approve") {
+        problems.push("no approval");
+      } else {
         const recomputed = cp.payloadHash(toMachine(task));
-        if (recomputed !== task.payloadHash || a.payloadHash !== task.payloadHash) problems.push("approval is not bound to this payload");
-        if (!a.expiresAt || Date.parse(now()) >= Date.parse(a.expiresAt)) problems.push("approval expired");
-        const d = db.prepare("SELECT * FROM decisions WHERE task_id = ?").get(task.id);
-        if (!d || d.decision_id !== a.decisionId || d.payload_hash !== task.payloadHash || d.decision !== "approve")
+        if (
+          recomputed !== task.payloadHash ||
+          a.payloadHash !== task.payloadHash
+        ) {
+          problems.push("approval is not bound to this payload");
+        }
+        const expired =
+          !a.expiresAt || Date.parse(now()) >= Date.parse(a.expiresAt);
+        if (expired) problems.push("approval expired");
+        const d = sql("decision").get(task.id);
+        const matches =
+          d &&
+          d.decision_id === a.decisionId &&
+          d.payload_hash === task.payloadHash &&
+          d.decision === "approve";
+        if (!matches) {
           problems.push("decision record does not match the approval");
-        if (Number(a.by) === task.requesterId) problems.push("approver is the requester");
+        }
+        if (Number(a.by) === task.requesterId) {
+          problems.push("approver is the requester");
+        }
       }
       const v = store.verifyAudit(task.id);
       if (!v.ok) problems.push(...v.problems);
       return { ok: problems.length === 0, problems };
     },
 
-    /** Execution is disabled in Phase 1; only a caller that explicitly enables it may start a task. */
+    /** Execution is disabled; only an explicit caller may start a task. */
     startTask(id, actor, { expectedVersion, executionEnabled = false } = {}) {
-      if (executionEnabled !== true) throw new NyteDeskError(403, "Task execution is not enabled in NyteDesk Phase 1");
+      if (executionEnabled !== true) {
+        throw new NyteDeskError(403, "Task execution is not enabled");
+      }
       return tx(() => {
         const r = store.reauthorize(id);
-        if (!r.ok) throw new NyteDeskError(409, `Reauthorization failed: ${r.problems.join("; ")}`);
-        const task = rowToTask(getTaskRow(id));
-        const next = machineTransition(task, { operation: "start", actorId: String(actor.id), expectedSequence: expectedVersion });
+        if (!r.ok) {
+          const why = r.problems.join("; ");
+          throw new NyteDeskError(409, `Reauthorization failed: ${why}`);
+        }
+        const task = requireTask(id);
+        const next = machineTransition(task, {
+          operation: "start",
+          actorId: String(actor.id),
+          expectedSequence: expectedVersion,
+        });
         casUpdate(task, next);
-        appendAudit(task.id, task.version, "task.start", actor, next.updatedAt, {});
+        const at = next.updatedAt;
+        appendAudit(task.id, task.version, "task.start", actor, at, {});
         return rowToTask(getTaskRow(task.id));
       });
     },
@@ -383,57 +571,100 @@ function openStore(options = {}) {
       if (!ids.length) return [];
       const lim = Math.max(1, Math.min(500, Number(limit) || 100));
       const marks = ids.map(() => "?").join(",");
-      const rows = status
-        ? db.prepare(`SELECT * FROM tasks WHERE workspace_id IN (${marks}) AND status = ? ORDER BY created_at DESC, id LIMIT ?`).all(...ids, String(status), lim)
-        : db.prepare(`SELECT * FROM tasks WHERE workspace_id IN (${marks}) ORDER BY created_at DESC, id LIMIT ?`).all(...ids, lim);
-      return rows.map(rowToTask);
+      const where = status
+        ? `workspace_id IN (${marks}) AND status = ?`
+        : `workspace_id IN (${marks})`;
+      const query = `SELECT * FROM tasks WHERE ${where}
+        ORDER BY created_at DESC, id LIMIT ?`;
+      const args = status ? [...ids, String(status), lim] : [...ids, lim];
+      return db
+        .prepare(query)
+        .all(...args)
+        .map(rowToTask);
     },
 
     auditFor(id) {
-      return db.prepare("SELECT * FROM audit WHERE task_id = ? ORDER BY sequence").all(String(id)).map((r) => ({
-        sequence: Number(r.sequence), event: r.event, actorId: Number(r.actor_id), actorRole: r.actor_role, at: r.at,
-        detail: JSON.parse(r.detail_json), prevHash: r.prev_hash, hash: r.hash,
-      }));
+      return sql("audit")
+        .all(String(id))
+        .map((r) => ({
+          sequence: Number(r.sequence),
+          event: r.event,
+          actorId: Number(r.actor_id),
+          actorRole: r.actor_role,
+          at: r.at,
+          detail: JSON.parse(r.detail_json),
+          prevHash: r.prev_hash,
+          hash: r.hash,
+        }));
     },
 
-    /** Recompute the hash chain and check it is continuous and ends at the task's current version. */
+    /** Recompute the hash chain; it must be continuous up to the version. */
     verifyAudit(id) {
       const problems = [];
       const task = rowToTask(getTaskRow(id));
       if (!task) return { ok: false, problems: ["task not found"] };
-      const rows = db.prepare("SELECT * FROM audit WHERE task_id = ? ORDER BY sequence").all(task.id);
-      let prev = sha256(`${ZERO}:${task.id}`);
+      const rows = sql("audit").all(task.id);
+      let prev = genesis(task.id);
       rows.forEach((r, i) => {
-        if (Number(r.sequence) !== i + 1) problems.push(`audit sequence gap at ${i + 1}`);
-        if (r.prev_hash !== prev) problems.push(`audit ${r.sequence}: previous-hash link broken`);
-        if (auditHash(r) !== r.hash) problems.push(`audit ${r.sequence}: hash mismatch`);
+        if (Number(r.sequence) !== i + 1) {
+          problems.push(`audit sequence gap at ${i + 1}`);
+        }
+        if (r.prev_hash !== prev) {
+          problems.push(`audit ${r.sequence}: previous-hash link broken`);
+        }
+        if (auditHash(r) !== r.hash) {
+          problems.push(`audit ${r.sequence}: hash mismatch`);
+        }
         prev = r.hash;
       });
-      if (rows.length + 1 !== task.version) problems.push("task version does not follow its audit");
-      if (cp.payloadHash(toMachine(task)) !== task.payloadHash) problems.push("task payload does not match its hash");
-      return { ok: problems.length === 0, problems, head: prev, events: rows.length };
+      if (rows.length + 1 !== task.version) {
+        problems.push("task version does not follow its audit");
+      }
+      if (cp.payloadHash(toMachine(task)) !== task.payloadHash) {
+        problems.push("task payload does not match its hash");
+      }
+      const ok = problems.length === 0;
+      return { ok, problems, head: prev, events: rows.length };
     },
 
     listProviders() {
-      return db.prepare("SELECT * FROM providers ORDER BY id").all().map((r) => ({
-        id: r.id, kind: r.kind, baseUrl: r.base_url, model: r.model, keyEnv: r.key_env,
-        version: Number(r.version), updatedBy: r.updated_by === null ? null : Number(r.updated_by), updatedAt: r.updated_at,
-      }));
+      return sql("providers")
+        .all()
+        .map((r) => ({
+          id: r.id,
+          kind: r.kind,
+          baseUrl: r.base_url,
+          model: r.model,
+          keyEnv: r.key_env,
+          version: Number(r.version),
+          updatedBy: r.updated_by === null ? null : Number(r.updated_by),
+          updatedAt: r.updated_at,
+        }));
     },
 
-    /** Inside a transaction: upsert a provider configuration with a version check (0 = new). */
+    /** Inside a transaction: upsert a provider with a version check (0 = new). */
     putProvider(id, actor, { kind, baseUrl, model, keyEnv, expectedVersion }) {
-      const row = db.prepare("SELECT version FROM providers WHERE id = ?").get(id);
+      const row = sql("providerVersion").get(id);
       const current = row ? Number(row.version) : 0;
-      if (expectedVersion !== current) throw new NyteDeskError(409, "Provider configuration changed; reload and retry");
+      const stale = "Provider configuration changed; reload and retry";
+      if (expectedVersion !== current) throw new NyteDeskError(409, stale);
       const at = now();
+      const by = Number(actor.id);
       if (row) {
-        const r = db.prepare(`UPDATE providers SET kind = ?, base_url = ?, model = ?, key_env = ?, version = ?, updated_by = ?, updated_at = ?
-          WHERE id = ? AND version = ?`).run(kind, baseUrl, model, keyEnv, current + 1, Number(actor.id), at, id, current);
-        if (Number(r.changes) !== 1) throw new NyteDeskError(409, "Provider configuration changed; reload and retry");
+        const r = sql("updateProvider").run(
+          kind,
+          baseUrl,
+          model,
+          keyEnv,
+          current + 1,
+          by,
+          at,
+          id,
+          current
+        );
+        if (Number(r.changes) !== 1) throw new NyteDeskError(409, stale);
       } else {
-        db.prepare(`INSERT INTO providers (id, kind, base_url, model, key_env, version, updated_by, updated_at)
-          VALUES (?, ?, ?, ?, ?, 1, ?, ?)`).run(id, kind, baseUrl, model, keyEnv, Number(actor.id), at);
+        sql("insertProvider").run(id, kind, baseUrl, model, keyEnv, by, at);
       }
       return store.listProviders().find((p) => p.id === id);
     },
@@ -449,4 +680,10 @@ function openStore(options = {}) {
   return store;
 }
 
-module.exports = { openStore, NyteDeskError, IDEMPOTENCY_KEY_RE, DEFAULT_APPROVAL_TTL_MS, sha256 };
+module.exports = {
+  openStore,
+  NyteDeskError,
+  IDEMPOTENCY_KEY_RE,
+  DEFAULT_APPROVAL_TTL_MS,
+  sha256,
+};

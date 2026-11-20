@@ -1,7 +1,7 @@
 "use strict";
 
 /**
- * NyteDesk Phase 1 control-plane primitives.
+ * NyteDesk control-plane primitives.
  * No shell, browser, model, network or filesystem execution is exposed here.
  * Callers must enforce authentication, workspace authorization, persistence,
  * and transaction isolation before exposing these primitives via HTTP.
@@ -29,36 +29,77 @@ const ACTIONS = Object.freeze({
   BROWSER_INTERACT: "browser.interact",
   GIT_PUSH: "git.push",
   GIT_MERGE: "git.merge",
+  CREDENTIAL_ACCESS: "credential.access",
+  PRIVILEGE_CHANGE: "privilege.change",
+  EXTERNAL_PUBLISH: "external.publish",
 });
 
-const RISK = Object.freeze({
-  [ACTIONS.MODEL_PROMPT]: "approval",
-  [ACTIONS.REPO_READ]: "approval",
-  [ACTIONS.VM_READ]: "approval",
-  [ACTIONS.VM_WRITE]: "approval",
-  [ACTIONS.VM_EXEC]: "approval",
-  [ACTIONS.BROWSER_READ]: "approval",
-  [ACTIONS.BROWSER_INTERACT]: "approval",
-  [ACTIONS.GIT_PUSH]: "approval",
-  [ACTIONS.GIT_MERGE]: "approval",
-});
+// Every action is approval-gated. Supervised mode is the only operating mode:
+// no action, including reads, runs without a human decision.
+const RISK = Object.freeze(
+  Object.fromEntries(Object.values(ACTIONS).map((a) => [a, "approval"]))
+);
 
-// All actions start gated. Future policy releases may explicitly downgrade
-// carefully scoped read-only operations, but not executable operations.
-const ALLOWED_ADAPTERS = Object.freeze(["anthropic", "openai", "ollama", "strata"]);
-// Actions whose approval needs an administrator (not only a manager): they change
-// state outside the conversation, publish, or execute.
-const ADMIN_APPROVAL_ACTIONS = Object.freeze([
-  ACTIONS.VM_WRITE, ACTIONS.VM_EXEC, ACTIONS.BROWSER_INTERACT, ACTIONS.GIT_PUSH, ACTIONS.GIT_MERGE,
+/**
+ * Agents NyteDesk knows. Roles follow the confirmed architecture:
+ * - coordinator: the local LLM plans, delegates and summarizes. It may only
+ *   RECOMMEND tasks; it never approves, grants permissions or bypasses review.
+ * - implementer: Claude Code CLI, the primary development agent (in the VM).
+ * - reviewer: OpenAI Codex CLI, independent review and debugging (in the VM).
+ * - api: hosted model APIs used through their official interfaces.
+ * Nothing here runs an agent; execution is disabled in this phase.
+ */
+const AGENTS = Object.freeze([
+  { id: "ollama", role: "coordinator", runtime: "local-api" },
+  { id: "strata", role: "coordinator", runtime: "local-api" },
+  { id: "claude-code", role: "implementer", runtime: "vm-cli" },
+  { id: "codex", role: "reviewer", runtime: "vm-cli" },
+  { id: "anthropic", role: "api", runtime: "cloud-api" },
+  { id: "openai", role: "api", runtime: "cloud-api" },
 ]);
+const ALLOWED_ADAPTERS = Object.freeze(AGENTS.map((a) => a.id));
+
+// Protected actions: their approval needs an administrator, not only a
+// manager. They change state outside the conversation, execute, publish,
+// touch credentials or change privileges.
+const ADMIN_APPROVAL_ACTIONS = Object.freeze([
+  ACTIONS.VM_WRITE,
+  ACTIONS.VM_EXEC,
+  ACTIONS.BROWSER_INTERACT,
+  ACTIONS.GIT_PUSH,
+  ACTIONS.GIT_MERGE,
+  ACTIONS.CREDENTIAL_ACCESS,
+  ACTIONS.PRIVILEGE_CHANGE,
+  ACTIONS.EXTERNAL_PUBLISH,
+]);
+
+/**
+ * Preconditions the owner set before any execution may be enabled. All are
+ * unverified in this phase, so execution stays disabled whatever the request.
+ */
+const EXECUTION_PRECONDITIONS = Object.freeze([
+  "vm-isolation-verified",
+  "host-shared-resources-reviewed",
+  "vm-recovery-snapshot-verified",
+  "execution-limits-and-cancellation-configured",
+  "credentials-protected",
+]);
+
 const MAX_DESCRIPTION = 4000;
-// Never silently drop audit history: a task that would exceed this is rejected.
+// Never silently drop audit history: a task that would exceed this is refused.
 const MAX_AUDIT_EVENTS = 128;
-const PAYLOAD_FIELDS = Object.freeze(["workspaceId", "requesterId", "description", "adapter", "action"]);
+const PAYLOAD_FIELDS = Object.freeze([
+  "workspaceId",
+  "requesterId",
+  "description",
+  "adapter",
+  "action",
+]);
 
 function assertNonempty(value, field, max = 256) {
-  if (typeof value !== "string" || !value.trim() || value.length > max)
+  if (typeof value !== "string" || !value.trim() || value.length > max) {
     throw new TypeError(`Invalid ${field}`);
+  }
   return value;
 }
 
@@ -74,17 +115,23 @@ function snapshot(task) {
   return structuredClone(task);
 }
 
-/** Canonical JSON: sorted keys, no whitespace. Used for payload binding and audit hashing. */
+/** Canonical JSON: sorted keys, no whitespace (payload binding, audit hashes). */
 function canonical(value) {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-  if (value && typeof value === "object")
-    return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${canonical(value[k])}`).join(",")}}`;
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value).sort();
+    const parts = keys.map(
+      (k) => `${JSON.stringify(k)}:${canonical(value[k])}`
+    );
+    return `{${parts.join(",")}}`;
+  }
   return JSON.stringify(value);
 }
 
 /**
- * SHA-256 over the immutable request payload. An approval records this hash and is valid only
- * for a task whose payload still hashes to it, so an approval can never be moved to other work.
+ * SHA-256 over the immutable request payload. An approval records this hash
+ * and is valid only for a task whose payload still hashes to it, so an
+ * approval can never be moved to other work.
  */
 function payloadHash(task) {
   const payload = {};
@@ -93,16 +140,22 @@ function payloadHash(task) {
 }
 
 function append(task, event, actor, at) {
-  if (task.audit.length >= MAX_AUDIT_EVENTS) throw new Error("Task audit capacity reached");
-  task.audit = task.audit.concat([{ sequence: task.nextSequence++, event, actor, at }]);
+  if (task.audit.length >= MAX_AUDIT_EVENTS) {
+    throw new Error("Task audit capacity reached");
+  }
+  const entry = { sequence: task.nextSequence++, event, actor, at };
+  task.audit = task.audit.concat([entry]);
   task.updatedAt = at;
 }
 
-function createTask({ workspaceId, requesterId, description, adapter, action }, options = {}) {
+function createTask(fields, options = {}) {
+  const { workspaceId, requesterId, description, adapter, action } = fields;
   assertNonempty(workspaceId, "workspaceId");
   assertNonempty(requesterId, "requesterId");
   assertNonempty(description, "description", MAX_DESCRIPTION);
-  if (!ALLOWED_ADAPTERS.includes(adapter)) throw new TypeError("Unsupported adapter");
+  if (!ALLOWED_ADAPTERS.includes(adapter)) {
+    throw new TypeError("Unsupported adapter");
+  }
   if (!Object.hasOwn(RISK, action)) throw new TypeError("Unsupported action");
   const at = (options.now ?? (() => new Date().toISOString()))();
   const task = {
@@ -126,46 +179,78 @@ function createTask({ workspaceId, requesterId, description, adapter, action }, 
   return deepFreeze(task);
 }
 
-function transition(task, { operation, actorId, expectedSequence, decisionId, approvedPayloadHash }, options = {}) {
-  if (!task || typeof task !== "object" || !Array.isArray(task.audit))
+function transition(task, args, options = {}) {
+  const { operation, actorId, expectedSequence, decisionId } = args;
+  if (!task || typeof task !== "object" || !Array.isArray(task.audit)) {
     throw new TypeError("Invalid task");
+  }
   assertNonempty(actorId, "actorId");
-  if (!Number.isSafeInteger(expectedSequence) || expectedSequence !== task.nextSequence)
+  if (
+    !Number.isSafeInteger(expectedSequence) ||
+    expectedSequence !== task.nextSequence
+  ) {
     throw new Error("Stale task version");
-  // A task object whose payload no longer matches its creation hash has been altered.
-  if (typeof task.payloadHash !== "string" || payloadHash(task) !== task.payloadHash)
+  }
+  // A task object whose payload no longer matches its creation hash was altered.
+  if (
+    typeof task.payloadHash !== "string" ||
+    payloadHash(task) !== task.payloadHash
+  ) {
     throw new Error("Task payload does not match its recorded hash");
+  }
   const at = (options.now ?? (() => new Date().toISOString()))();
   const next = snapshot(task);
   switch (operation) {
     case "approve":
     case "deny":
-      if (next.status !== STATES.WAITING) throw new Error("Task is not awaiting approval");
-      if (actorId === next.requesterId) throw new Error("Requester cannot self-approve");
+      if (next.status !== STATES.WAITING) {
+        throw new Error("Task is not awaiting approval");
+      }
+      if (actorId === next.requesterId) {
+        throw new Error("Requester cannot self-approve");
+      }
       assertNonempty(decisionId, "decisionId");
       // The decider must name the exact payload they reviewed.
-      if (approvedPayloadHash !== next.payloadHash)
+      if (args.approvedPayloadHash !== next.payloadHash) {
         throw new Error("Decision does not match the task payload");
-      next.approval = { by: actorId, decisionId, at, decision: operation, payloadHash: next.payloadHash };
+      }
+      next.approval = {
+        by: actorId,
+        decisionId,
+        at,
+        decision: operation,
+        payloadHash: next.payloadHash,
+      };
       next.status = operation === "approve" ? STATES.APPROVED : STATES.DENIED;
       break;
     case "start":
-      if (next.status !== STATES.APPROVED || !next.approval || next.approval.decision !== "approve")
+      if (
+        next.status !== STATES.APPROVED ||
+        !next.approval ||
+        next.approval.decision !== "approve"
+      ) {
         throw new Error("Task is not approved");
-      if (next.approval.payloadHash !== next.payloadHash)
+      }
+      if (next.approval.payloadHash !== next.payloadHash) {
         throw new Error("Approval is not bound to this task payload");
+      }
       next.status = STATES.RUNNING;
       break;
     case "succeed":
     case "fail":
-      if (next.status !== STATES.RUNNING) throw new Error("Task is not running");
+      if (next.status !== STATES.RUNNING) {
+        throw new Error("Task is not running");
+      }
       next.status = operation === "succeed" ? STATES.SUCCEEDED : STATES.FAILED;
       break;
-    case "cancel":
-      if (![STATES.WAITING, STATES.APPROVED, STATES.RUNNING].includes(next.status))
+    case "cancel": {
+      const open = [STATES.WAITING, STATES.APPROVED, STATES.RUNNING];
+      if (!open.includes(next.status)) {
         throw new Error("Task cannot be cancelled");
+      }
       next.status = STATES.CANCELLED;
       break;
+    }
     default:
       throw new TypeError("Unsupported operation");
   }
@@ -173,12 +258,28 @@ function transition(task, { operation, actorId, expectedSequence, decisionId, ap
   return deepFreeze(next);
 }
 
-/** Planning-only adapter catalog; contains no API keys or remote endpoints. */
+/** Planning-only agent catalog; contains no API keys or remote endpoints. */
 function listAdapters() {
-  return ALLOWED_ADAPTERS.map((id) => ({ id, configured: false, executionEnabled: false }));
+  return AGENTS.map((a) => ({
+    id: a.id,
+    role: a.role,
+    runtime: a.runtime,
+    configured: false,
+    executionEnabled: false,
+  }));
 }
 
 module.exports = {
-  STATES, ACTIONS, ALLOWED_ADAPTERS, ADMIN_APPROVAL_ACTIONS, MAX_DESCRIPTION,
-  createTask, transition, listAdapters, payloadHash, canonical,
+  STATES,
+  ACTIONS,
+  AGENTS,
+  ALLOWED_ADAPTERS,
+  ADMIN_APPROVAL_ACTIONS,
+  EXECUTION_PRECONDITIONS,
+  MAX_DESCRIPTION,
+  createTask,
+  transition,
+  listAdapters,
+  payloadHash,
+  canonical,
 };
