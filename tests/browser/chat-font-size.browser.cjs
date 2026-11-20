@@ -1,12 +1,16 @@
 // Real-browser check of the chat font-size module and the chat markdown CSS.
 // This is a standalone harness, not the AnythingLLM app: it serves the real
 // frontend/src/utils/chat/textSize.js and the real index.css rules to Chrome.
-// Run: NODE_PATH=<dir with playwright> node tests/browser/chat-font-size.browser.cjs
+// Run: NODE_PATH=<dir with playwright or playwright-core> CHROME=<chrome path> \
+//      node tests/browser/chat-font-size.browser.cjs
 const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
 const assert = require("node:assert/strict");
-const { chromium } = require("playwright");
+// Full playwright or playwright-core: either drives an installed Chrome.
+const { chromium } = (() => {
+  try { return require("playwright"); } catch { return require("playwright-core"); }
+})();
 
 const root = path.resolve(__dirname, "../..");
 const moduleSrc = fs.readFileSync(path.join(root, "frontend/src/utils/chat/textSize.js"), "utf8");

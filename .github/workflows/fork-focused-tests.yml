@@ -16,6 +16,10 @@ on:
     paths:
       - ".github/workflows/fork-focused-tests.yml"
       - "tests/fork/**"
+      - "tests/browser/**"
+      - "server/utils/nytedesk/**"
+      - "server/endpoints/nytedesk.js"
+      - "frontend/**"
       - "tools/linux-run.sh"
       - "tools/stage-frontend.cjs"
       - "collector/utils/archives/**"
@@ -43,3 +47,49 @@ jobs:
         run: bash -n tools/linux-run.sh
       - name: Run fork regression tests
         run: node --test tests/fork/*.test.cjs
+
+  # Production frontend build: proves the Vite bundle compiles. Build only:
+  # read-only token, no secrets, nothing published or pushed.
+  frontend-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Install frontend dependencies (lockfile only)
+        run: cd frontend && yarn install --frozen-lockfile --non-interactive
+      - name: Production build
+        run: cd frontend && yarn build
+      - name: Report bundle
+        run: |
+          test -f frontend/dist/_index.html
+          du -sh frontend/dist
+          ls frontend/dist/assets | wc -l
+
+  # Real Chrome (preinstalled on the runner) against the slider module and the
+  # chat CSS. A harness, not the full app.
+  browser-harness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Install playwright-core (no browser download)
+        run: npm install --no-save --no-package-lock --prefix "$RUNNER_TEMP/pw" playwright-core@1
+      - name: Chat font-size browser harness
+        env:
+          NODE_PATH: ${{ runner.temp }}/pw/node_modules
+          CHROME: /usr/bin/google-chrome
+        run: node tests/browser/chat-font-size.browser.cjs
