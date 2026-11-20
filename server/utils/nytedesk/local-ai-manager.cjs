@@ -175,17 +175,28 @@ function requestProcessAction() {
 }
 
 /** The model names in a model-list answer, or null if the shape is wrong. */
+// Model names come from an engine NyteDesk does not control: keep only short
+// printable strings, once each, so a hostile list cannot bloat storage or UI.
+const MODEL_NAME_MAX = 256;
+const PRINTABLE = /^[^\u0000-\u001f\u007f]+$/;
+
+function cleanNames(names) {
+  const valid = names.filter(
+    (n) =>
+      typeof n === "string" && n.length <= MODEL_NAME_MAX && PRINTABLE.test(n)
+  );
+  return [...new Set(valid)];
+}
+
 function modelNames(api, body) {
   if (api === "ollama") {
     if (!body || !Array.isArray(body.models)) return null;
-    return body.models
-      .map((m) => (m && (m.name || m.model)) || null)
-      .filter((n) => typeof n === "string");
+    return cleanNames(
+      body.models.map((m) => (m && (m.name || m.model)) || null)
+    );
   }
   if (!body || !Array.isArray(body.data)) return null;
-  return body.data
-    .map((m) => (m && m.id) || null)
-    .filter((n) => typeof n === "string");
+  return cleanNames(body.data.map((m) => (m && m.id) || null));
 }
 
 /** One GET to a loopback URL: no redirects, no proxy, bounded time and size. */

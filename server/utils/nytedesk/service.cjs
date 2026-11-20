@@ -50,6 +50,31 @@ const ENGINE_FIELDS = [
 const SELECTION_KEY = "engine_selection";
 // A selection needs a successful availability check no older than this.
 const SELECTION_MAX_CHECK_AGE_MS = 15 * 60 * 1000;
+/**
+ * Why `engine` cannot be selected now, or null when it can. Selection needs
+ * fresh, matching evidence: a check of the current endpoint that reached the
+ * engine within SELECTION_MAX_CHECK_AGE_MS and listed the configured model.
+ * The engines listing and the selection route share this one rule.
+ */
+function selectionBlocker(engine, now) {
+  const check = engine.lastCheck;
+  if (!engine.endpoint) return "Set an endpoint, then run a check";
+  if (!check || check.status !== lam.STATUSES.EXTERNAL) {
+    return "Run a successful availability check before selecting this engine";
+  }
+  if (check.endpoint !== engine.endpoint) {
+    return "The endpoint changed since the check";
+  }
+  const age = now - Date.parse(check.checkedAt);
+  if (!(age <= SELECTION_MAX_CHECK_AGE_MS)) {
+    return "The last check is too old; check again";
+  }
+  if (engine.model && check.modelListed !== true) {
+    return "The selected model was not listed by the engine";
+  }
+  return null;
+}
+
 const PROCESS_DENIED =
   "Process control is disabled: NyteDesk never starts, stops, restarts, unloads or kills inference engines. Running engines are externally owned.";
 const OPEN_STATES = ["waiting_approval", "approved", "running"];
@@ -470,7 +495,19 @@ function createService(store, options = {}) {
           canStop: false,
         };
       });
-      return { engines: list, selection, processControl: false };
+      const now = Date.now();
+      for (const engine of list) {
+        const blocker = selectionBlocker(engine, now);
+        engine.selectable = blocker === null;
+        engine.selectionBlockedReason = blocker;
+        engine.selected = selection?.engineId === engine.id;
+      }
+      return {
+        engines: list,
+        selection,
+        selectionMaxCheckAgeMs: SELECTION_MAX_CHECK_AGE_MS,
+        processControl: false,
+      };
     },
 
     putEngine(actor, id, body, idempotencyKey) {
@@ -535,29 +572,8 @@ function createService(store, options = {}) {
         }
         const all = service.engines(actor).engines;
         const engine = all.find((e) => e.id === engineId);
-        const check = engine.lastCheck;
-        const age = check ? Date.now() - Date.parse(check.checkedAt) : Infinity;
-        if (!check || check.status !== lam.STATUSES.EXTERNAL) {
-          throw new NyteDeskError(
-            409,
-            "Run a successful availability check before selecting this engine"
-          );
-        }
-        if (age > SELECTION_MAX_CHECK_AGE_MS) {
-          throw new NyteDeskError(
-            409,
-            "The last check is too old; check again"
-          );
-        }
-        if (check.endpoint !== engine.endpoint) {
-          throw new NyteDeskError(409, "The endpoint changed since the check");
-        }
-        if (engine.model && check.modelListed !== true) {
-          throw new NyteDeskError(
-            409,
-            "The selected model was not listed by the engine"
-          );
-        }
+        const blocker = selectionBlocker(engine, Date.now());
+        if (blocker) throw new NyteDeskError(409, blocker);
         const selection = {
           selectionId: sha256(`${engineId}:${actor.id}:${Date.now()}`),
           engineId,

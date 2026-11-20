@@ -7,8 +7,8 @@ import {
   CHAT_FONT_MIN,
   CHAT_FONT_MAX,
   CHAT_FONT_DEFAULT,
-  normalizeChatFontSize,
   readChatFontSize,
+  subscribeChatFontSize,
   writeChatFontSize,
 } from "@/utils/chat/textSize";
 
@@ -64,11 +64,7 @@ function TextSizeControls() {
   const { t } = useTranslation();
   const [size, setSize] = useState(readChatFontSize);
 
-  useEffect(() => {
-    const onChange = (event) => setSize(normalizeChatFontSize(event.detail));
-    window.addEventListener("textSizeChange", onChange);
-    return () => window.removeEventListener("textSizeChange", onChange);
-  }, []);
+  useEffect(() => subscribeChatFontSize(setSize), []);
 
   const change = (value) => setSize(writeChatFontSize(value));
   return (

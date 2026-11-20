@@ -10,11 +10,20 @@ const TEXT = {
     "PolyStrata's port can change between sessions; update the endpoint when it does.",
   strata: "Strata has no default endpoint; set its endpoint and API style.",
 };
-const STATUS_STYLE = {
-  external: "bg-green-500/20 text-green-300",
-  stopped: "bg-zinc-500/20 text-zinc-300",
-  failed: "bg-red-500/20 text-red-300",
-  unknown: "bg-zinc-700 text-white",
+// A probe can only tell whether the engine answered. "stopped" from the probe
+// means "did not answer": NyteDesk cannot know whether the process is running.
+const STATUS_VIEW = {
+  external: ["reachable", "bg-green-500/20 text-green-300"],
+  stopped: ["unreachable", "bg-red-500/20 text-red-300"],
+  failed: ["check failed", "bg-red-500/20 text-red-300"],
+  unknown: ["not checked", "bg-zinc-700 text-white"],
+};
+const ROLE_NOTE = {
+  admin: "You can check, configure and select engines.",
+  manager:
+    "You can run availability checks. Configuring or selecting an engine requires an administrator.",
+  default:
+    "Read-only view. Checks require a manager or administrator; configuring or selecting an engine requires an administrator.",
 };
 const input =
   "bg-theme-settings-input-bg text-white text-xs rounded-lg p-2 border border-white/10";
@@ -24,10 +33,13 @@ const muted = "text-xs text-theme-text-secondary";
 
 const toInt = (value) => (value === "" ? null : Number(value));
 
-function StatusBadge({ check }) {
-  const status = check?.status || "unknown";
-  const style = STATUS_STYLE[status] || STATUS_STYLE.unknown;
-  const label = status === "external" ? "available (external)" : status;
+function StatusBadge({ engine }) {
+  const check = engine.lastCheck;
+  const status = engine.endpoint ? check?.status || "unknown" : "unconfigured";
+  const [label, style] =
+    status === "unconfigured"
+      ? ["not configured", "bg-zinc-700 text-white"]
+      : STATUS_VIEW[status] || STATUS_VIEW.unknown;
   return (
     <span className={`px-2 py-0.5 rounded font-mono w-fit ${style}`}>
       {label}
@@ -58,8 +70,9 @@ export default function LocalAIEngines({ role }) {
         Local AI Engines
       </p>
       <p className={muted}>{TEXT.description}</p>
+      <p className={muted}>{ROLE_NOTE[role] || ROLE_NOTE.default}</p>
       {error && <p className="text-xs text-red-300">{error}</p>}
-      {data && <Selection selection={data.selection} />}
+      {data && <Selection selection={data.selection} engines={data.engines} />}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
         {(data?.engines || []).map((engine) => (
           <EngineCard
@@ -76,20 +89,42 @@ export default function LocalAIEngines({ role }) {
   );
 }
 
-function Selection({ selection }) {
+function Selection({ selection, engines }) {
   if (!selection) {
     return <p className={muted}>No engine is selected for the coordinator.</p>;
   }
   const model = selection.model ? ` · ${selection.model}` : "";
   const where = `${selection.engineId} at ${selection.endpoint}${model}`;
   const text = `Coordinator engine: ${where}`;
-  return <p className="text-xs text-theme-text-primary">{text}</p>;
+  const engine = engines.find((e) => e.id === selection.engineId);
+  const status = engine?.lastCheck?.status;
+  const changed =
+    engine &&
+    (engine.endpoint !== selection.endpoint ||
+      (engine.model ?? null) !== (selection.model ?? null));
+  let warning = null;
+  if (changed) {
+    warning =
+      "Its configuration changed after it was selected; check and select it again.";
+  } else if (status && status !== "external") {
+    warning = "The last check could not reach it.";
+  }
+  return (
+    <div className="text-xs flex flex-col gap-0.5">
+      <p className="text-theme-text-primary">{text}</p>
+      {warning && <p className="text-amber-300">{warning}</p>}
+    </div>
+  );
 }
 
 function EngineCard({ engine, selection, canCheck, isAdmin, onChanged }) {
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
-  const [selectKey] = useState(() => NyteDesk.newIdempotencyKey());
+  // One key per attempt: reused only to retry a request that never got an
+  // answer, replaced once the server has answered.
+  const [selectKey, setSelectKey] = useState(() =>
+    NyteDesk.newIdempotencyKey()
+  );
   const check = engine.lastCheck;
   const selected = selection?.engineId === engine.id;
 
@@ -98,14 +133,21 @@ function EngineCard({ engine, selection, canCheck, isAdmin, onChanged }) {
     const r = await NyteDesk.checkEngine(engine.id);
     setBusy(false);
     if (!r.ok) return showToast(r.error, "error");
-    showToast(`${engine.name}: ${r.data.check.status}`, "info");
+    const view = STATUS_VIEW[r.data.check.status] || STATUS_VIEW.unknown;
+    showToast(`${engine.name}: ${view[0]}`, "info");
     onChanged();
   };
 
   const select = async () => {
     const expected = selection?.selectionId ?? null;
+    setBusy(true);
     const r = await NyteDesk.selectEngine(engine.id, expected, selectKey);
-    if (!r.ok) return showToast(r.error, "error");
+    setBusy(false);
+    if (r.status !== 0) setSelectKey(NyteDesk.newIdempotencyKey());
+    if (!r.ok) {
+      showToast(r.error, "error");
+      return onChanged();
+    }
     showToast(`${engine.name} selected`, "success");
     onChanged();
   };
@@ -125,7 +167,7 @@ function EngineCard({ engine, selection, canCheck, isAdmin, onChanged }) {
     <div className={card}>
       <div className="flex justify-between items-center">
         <p className="font-semibold text-sm">{engine.name}</p>
-        <StatusBadge check={check} />
+        <StatusBadge engine={engine} />
       </div>
       <p className="font-mono break-all">{`${endpoint}${defaultNote}`}</p>
       <p>{apiLine}</p>
@@ -135,15 +177,20 @@ function EngineCard({ engine, selection, canCheck, isAdmin, onChanged }) {
       {selected && (
         <p className="text-green-300">selected for the coordinator</p>
       )}
-      {check && <CheckResult check={check} />}
+      {check && <CheckResult check={check} endpoint={engine.endpoint} />}
+      {isAdmin && !selected && engine.selectionBlockedReason && (
+        <p className="text-amber-300">{`Select: ${engine.selectionBlockedReason}`}</p>
+      )}
       <div className="flex flex-wrap gap-2 pt-1">
         {canCheck && (
           <CTAButton disabled={busy} onClick={runCheck}>
             {busy ? "Checking…" : "Check"}
           </CTAButton>
         )}
-        {isAdmin && check?.status === "external" && !selected && (
-          <CTAButton onClick={select}>Select</CTAButton>
+        {isAdmin && engine.selectable && !selected && (
+          <CTAButton disabled={busy} onClick={select}>
+            Select
+          </CTAButton>
         )}
         {isAdmin && (
           <CTAButton onClick={() => setEditing(!editing)}>
@@ -156,14 +203,21 @@ function EngineCard({ engine, selection, canCheck, isAdmin, onChanged }) {
   );
 }
 
-function CheckResult({ check }) {
+function CheckResult({ check, endpoint }) {
   const models = check.models.slice(0, 8).join(", ");
   const more = check.models.length > 8 ? ` +${check.models.length - 8}` : "";
-  const when = `checked ${check.checkedAt}`;
+  const when = `checked ${new Date(check.checkedAt).toLocaleString()}`;
   const latency = check.latencyMs !== null ? ` · ${check.latencyMs} ms` : "";
+  const http = check.httpStatus ? ` · HTTP ${check.httpStatus}` : "";
   return (
     <div className="flex flex-col gap-0.5 border-t border-white/5 pt-1">
-      <p className={muted}>{`${when}${latency}`}</p>
+      <p className={muted}>{`${when}${latency}${http}`}</p>
+      {check.endpoint && check.endpoint !== endpoint && (
+        <p className="text-amber-300">{`This check was for ${check.endpoint}, not the current endpoint.`}</p>
+      )}
+      {check.model && (
+        <p>{`model ${check.model}: ${check.modelListed ? "listed" : "not listed"}`}</p>
+      )}
       {models && <p className="break-all">{`models: ${models}${more}`}</p>}
       <ul>
         {check.diagnostics.map((d) => (
@@ -184,10 +238,12 @@ function EngineForm({ engine, onSaved }) {
     contextWindow: engine.contextWindow ?? "",
     vramReserveMiB: engine.vramReserveMiB ?? "",
   });
-  const [key] = useState(() => NyteDesk.newIdempotencyKey());
+  const [key, setKey] = useState(() => NyteDesk.newIdempotencyKey());
+  const [saving, setSaving] = useState(false);
   const field = (name) => (e) => setForm({ ...form, [name]: e.target.value });
   const save = async (e) => {
     e.preventDefault();
+    if (saving) return;
     const body = {
       endpoint: form.endpoint || null,
       model: form.model || null,
@@ -196,7 +252,10 @@ function EngineForm({ engine, onSaved }) {
       expectedVersion: engine.version,
     };
     if (engine.id === "strata") body.api = form.api || null;
+    setSaving(true);
     const r = await NyteDesk.saveEngine(engine.id, body, key);
+    setSaving(false);
+    if (r.status !== 0) setKey(NyteDesk.newIdempotencyKey());
     if (!r.ok) return showToast(r.error, "error");
     showToast(`${engine.name} saved`, "success");
     onSaved();
@@ -218,7 +277,12 @@ function EngineForm({ engine, onSaved }) {
         onChange={field("endpoint")}
       />
       {engine.id === "strata" && (
-        <select className={input} value={form.api} onChange={field("api")}>
+        <select
+          className={input}
+          aria-label="API style"
+          value={form.api}
+          onChange={field("api")}
+        >
           <option value="">API style…</option>
           <option value="openai">OpenAI-compatible</option>
           <option value="ollama">Ollama</option>
@@ -227,6 +291,7 @@ function EngineForm({ engine, onSaved }) {
       <input
         className={input}
         placeholder="Model"
+        aria-label="Model"
         value={form.model}
         onChange={field("model")}
       />
@@ -235,6 +300,8 @@ function EngineForm({ engine, onSaved }) {
           className={input}
           type="number"
           placeholder="Context window"
+          aria-label="Context window (tokens)"
+          min={512}
           value={form.contextWindow}
           onChange={field("contextWindow")}
         />
@@ -242,12 +309,20 @@ function EngineForm({ engine, onSaved }) {
           className={input}
           type="number"
           placeholder="VRAM reserve MiB"
+          aria-label="VRAM reserve (MiB)"
+          min={0}
           value={form.vramReserveMiB}
           onChange={field("vramReserveMiB")}
         />
       </div>
       <div>
-        <CTAButton onClick={save}>Save</CTAButton>
+        <button
+          type="submit"
+          disabled={saving}
+          className="border-none text-xs px-4 py-1 font-semibold light:text-[#ffffff] rounded-lg bg-primary-button hover:bg-secondary hover:text-white h-[34px] w-fit disabled:opacity-50"
+        >
+          {saving ? "Saving…" : "Save"}
+        </button>
       </div>
     </form>
   );

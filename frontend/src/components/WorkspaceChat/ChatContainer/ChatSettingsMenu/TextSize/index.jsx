@@ -5,18 +5,20 @@ import {
   CHAT_FONT_MIN,
   CHAT_FONT_MAX,
   CHAT_FONT_DEFAULT,
-  normalizeChatFontSize,
   readChatFontSize,
+  subscribeChatFontSize,
   writeChatFontSize,
 } from "@/utils/chat/textSize";
 
 const SLIDER_ID = "nytedesk-settings-font-size";
 
 /**
- * Chat font-size row of the chat settings menu. The submenu opens on hover,
- * on click, and from the keyboard (Enter, Space or ArrowLeft on the row);
- * Escape closes it and returns focus to the row. The slider is a native range
- * input, so arrow keys, Home and End adjust it; changes apply live and persist.
+ * Chat font-size row of the chat settings menu. The submenu opens on mouse
+ * hover, on click or tap, and from the keyboard (Enter, Space or ArrowLeft on
+ * the row); Escape closes it and returns focus to the row. The slider is a
+ * native range input, so arrow keys, Home and End adjust it; changes apply
+ * live and persist. Below the md breakpoint the submenu opens inline under the
+ * row, because a flyout to the left would leave a phone screen.
  */
 export default function TextSizeRow() {
   const { t } = useTranslation();
@@ -24,13 +26,12 @@ export default function TextSizeRow() {
   const [size, setSize] = useState(readChatFontSize);
   const rowRef = useRef(null);
   const sliderRef = useRef(null);
+  // True after a mouse hover opened the submenu, so the click that follows
+  // keeps it open instead of toggling it shut.
+  const openedByHover = useRef(false);
   const label = t("chat_window.text_size_label");
 
-  useEffect(() => {
-    const onChange = (event) => setSize(normalizeChatFontSize(event.detail));
-    window.addEventListener("textSizeChange", onChange);
-    return () => window.removeEventListener("textSizeChange", onChange);
-  }, []);
+  useEffect(() => subscribeChatFontSize(setSize), []);
 
   useEffect(() => {
     if (showSubmenu && document.activeElement === rowRef.current) {
@@ -43,6 +44,15 @@ export default function TextSizeRow() {
   const close = () => {
     setShowSubmenu(false);
     rowRef.current?.focus();
+  };
+
+  const onRowClick = () => {
+    if (openedByHover.current) {
+      openedByHover.current = false;
+      setShowSubmenu(true);
+      return;
+    }
+    setShowSubmenu((open) => !open);
   };
 
   const onRowKeyDown = (event) => {
@@ -73,8 +83,17 @@ export default function TextSizeRow() {
   return (
     <div
       className="relative"
-      onMouseEnter={() => setShowSubmenu(true)}
-      onMouseLeave={() => setShowSubmenu(false)}
+      onPointerEnter={(event) => {
+        // Touch and pen taps also fire enter; only a mouse opens on hover.
+        if (event.pointerType !== "mouse") return;
+        openedByHover.current = true;
+        setShowSubmenu(true);
+      }}
+      onPointerLeave={(event) => {
+        if (event.pointerType !== "mouse") return;
+        openedByHover.current = false;
+        setShowSubmenu(false);
+      }}
       onBlur={onBlur}
     >
       <button
@@ -83,7 +102,7 @@ export default function TextSizeRow() {
         aria-haspopup="true"
         aria-expanded={showSubmenu}
         aria-controls={showSubmenu ? `${SLIDER_ID}-panel` : undefined}
-        onClick={() => setShowSubmenu(!showSubmenu)}
+        onClick={onRowClick}
         onKeyDown={onRowKeyDown}
         className={`w-full border-none flex items-center justify-between px-2 py-1 rounded cursor-pointer ${rowState}`}
       >
@@ -102,10 +121,10 @@ export default function TextSizeRow() {
       {showSubmenu && (
         <div
           id={`${SLIDER_ID}-panel`}
-          className="absolute right-full top-0 -mr-2 pr-2 pt-0"
+          className="mt-1 md:mt-0 md:absolute md:right-full md:top-0 md:-mr-2 md:pr-2"
           onKeyDown={onSubmenuKeyDown}
         >
-          <div className="bg-zinc-800 light:bg-slate-50 border border-zinc-700 light:border-slate-300 rounded-lg p-3.5 w-[190px] flex flex-col gap-2 shadow-lg">
+          <div className="bg-zinc-800 light:bg-slate-50 border border-zinc-700 light:border-slate-300 rounded-lg p-3.5 w-full md:w-[190px] flex flex-col gap-2 shadow-lg">
             <label
               htmlFor={SLIDER_ID}
               className="flex justify-between text-xs text-white light:text-slate-800"

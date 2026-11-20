@@ -7,8 +7,8 @@ import {
   CHAT_FONT_MIN,
   CHAT_FONT_MAX,
   CHAT_FONT_DEFAULT,
-  normalizeChatFontSize,
   readChatFontSize,
+  subscribeChatFontSize,
   writeChatFontSize,
 } from "@/utils/chat/textSize";
 
@@ -35,12 +35,7 @@ export default function TextSizeMenu() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [showMenu]);
 
-  useEffect(() => {
-    const handleChange = (e) =>
-      setSelectedSize(normalizeChatFontSize(e.detail));
-    window.addEventListener("textSizeChange", handleChange);
-    return () => window.removeEventListener("textSizeChange", handleChange);
-  }, []);
+  useEffect(() => subscribeChatFontSize(setSelectedSize), []);
 
   function handleTextSizeChange(e) {
     setSelectedSize(writeChatFontSize(Number(e.target.value)));
