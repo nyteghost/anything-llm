@@ -40,9 +40,9 @@ Acceptance: end-to-end navigation and actual task/status integration, not a mock
 
 ## M3 — Local AI Manager (near-term priority)
 
-- [ ] Review PR #3 registry and safety tests.
-- [ ] Configure Ollama, Strata and PolyStrata endpoint/model registration; never hardcode an ephemeral port.
-- [ ] Health probes, readiness state, model discovery and active-model display.
+- [x] Review PR #3 registry and safety tests (integrated in PR #6).
+- [x] Configure Ollama, Strata and PolyStrata endpoint/model registration; never hardcode an ephemeral port (PR #6).
+- [x] Health probes, readiness state, model discovery and active-model display (PR #6; read-only, externally owned engines).
 - [ ] Secure process lifecycle with fixed allowlisted executable/arguments, separate local authenticated controller, exact process ownership and resource limits.
 - [ ] One-click start/connect/switch/stop (with explicit confirmation before affecting an independently running service).
 - [ ] VRAM/RAM usage, safe engine-switch memory budget, graceful unload, idle behavior, failure recovery.
