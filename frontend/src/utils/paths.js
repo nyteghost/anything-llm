@@ -166,6 +166,7 @@ export default {
       return `/settings/model-routers/${id}`;
     },
     systemPromptVariables: () => "/settings/system-prompt-variables",
+    nytedesk: () => "/settings/nytedesk",
     logs: () => {
       return "/settings/event-logs";
     },

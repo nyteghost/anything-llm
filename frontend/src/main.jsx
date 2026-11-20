@@ -175,6 +175,15 @@ const router = createBrowserRouter([
         },
       },
       {
+        path: "/settings/nytedesk",
+        lazy: async () => {
+          const { default: NyteDeskDashboard } = await import(
+            "@/pages/NyteDesk"
+          );
+          return { element: <PrivateRoute Component={NyteDeskDashboard} /> };
+        },
+      },
+      {
         path: "/settings/event-logs",
         lazy: async () => {
           const { default: AdminLogs } = await import("@/pages/Admin/Logging");
