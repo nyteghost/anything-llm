@@ -177,6 +177,9 @@ async function signIn(browser, u, options = {}) {
   return { context, page };
 }
 
+const overlaps = (a, b) =>
+  !!a && !!b && a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+
 async function shot(page, name) {
   await page.waitForTimeout(400);
   await page.screenshot({ path: path.join(SHOTS, `${name}.png`), fullPage: false });
@@ -216,6 +219,15 @@ async function main() {
       assert.equal(await page.getByRole("button", { name: label, exact: true }).count(), 0, label);
     }
     ok("no process-control buttons");
+
+    // AnythingLLM's account button sits in the top bar without covering its controls.
+    const account = await page.locator("div:has(> .nytedesk-app) > div.absolute:first-child").boundingBox();
+    const textSizeButton = await page.getByRole("banner").getByRole("button", { name: /text size/i }).boundingBox();
+    const banner = await page.getByRole("banner").boundingBox();
+    assert.ok(account && textSizeButton, "account and text-size buttons are visible");
+    assert.equal(overlaps(account, textSizeButton), false, "account button covers the text-size button");
+    assert.ok(account.y + account.height <= banner.y + banner.height + 1, "account button stays inside the top bar");
+    ok("account button sits inside the top bar without covering the text-size control");
 
     await page.getByRole("region", { name: "AI chat workspace and agent playground" }).waitFor();
     await page.locator("textarea").first().waitFor({ timeout: 20000 });
@@ -282,6 +294,13 @@ async function main() {
     await shot(page, "06-tasks-and-states");
     await page.goto(`${BASE}/nytedesk/engines`);
     await page.getByText("externally owned", { exact: false }).first().waitFor();
+    const engineButtons = page.getByRole("button", { name: /^(Check|Select|Configure)$/ });
+    const boxes = [];
+    for (let i = 0; i < (await engineButtons.count()); i++) boxes.push(await engineButtons.nth(i).boundingBox());
+    assert.ok(boxes.length >= 3, `engine buttons found: ${boxes.length}`);
+    for (let i = 0; i < boxes.length; i++)
+      for (let j = i + 1; j < boxes.length; j++) assert.equal(overlaps(boxes[i], boxes[j]), false, `engine buttons ${i} and ${j} overlap`);
+    ok("engine card buttons do not overlap");
     await shot(page, "07-local-ai-manager");
     await page.goto(`${BASE}/nytedesk/agentbridge`);
     await page.getByRole("heading", { name: "Who does what" }).waitFor();

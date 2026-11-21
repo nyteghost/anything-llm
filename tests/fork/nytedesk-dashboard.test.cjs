@@ -176,3 +176,8 @@ test("the account button is placed inside the dashboard top bar, which reserves 
   assert.match(shell, /className="nytedesk-app /);
   assert.match(shell, /pr-16 md:pr-20 h-14/);
 });
+
+test("engine card buttons cancel CTAButton's corner margin so they do not overlap", () => {
+  const cards = read("frontend/src/pages/NyteDesk/LocalAIEngines.jsx");
+  assert.equal((cards.match(/<CTAButton(?! className="!mr-0")/g) || []).length, 0);
+});
