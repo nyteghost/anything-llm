@@ -492,8 +492,12 @@ test("a task probe for model B never becomes selection evidence for configured m
 });
 
 // A slow local test double: answers immediately, then trickles one byte every
-// 40 ms so an idle (inactivity) timeout would never fire. Also a redirect whose
-// body never ends, and an oversized body.
+// 40 ms so an idle (inactivity) timeout would never fire. It has its own
+// cutoff: after TRICKLE_CUTOFF_MS it destroys the connection. If a client ever
+// reverts to an inactivity timeout, its call ends at the cutoff (not at its
+// deadline) with a non-TIMEOUT code, so the test fails promptly instead of
+// hanging.
+const TRICKLE_CUTOFF_MS = 2500;
 async function withSlowServer(fn) {
   const sockets = { closed: 0 };
   const slow = http.createServer((req, res) => {
@@ -511,7 +515,11 @@ async function withSlowServer(fn) {
     res.writeHead(200, { "content-type": "application/json" });
     res.write("{");
     const t = setInterval(() => res.write(" "), 40);
-    res.on("close", () => clearInterval(t));
+    const cutoff = setTimeout(() => res.destroy(), TRICKLE_CUTOFF_MS);
+    res.on("close", () => {
+      clearInterval(t);
+      clearTimeout(cutoff);
+    });
   });
   await new Promise((r) => slow.listen(0, "127.0.0.1", r));
   try {
@@ -523,7 +531,7 @@ async function withSlowServer(fn) {
 }
 const elapsed = async (p) => { const t = Date.now(); const out = await p; return { out, ms: Date.now() - t }; };
 
-test("elapsed deadlines: the fresh probe, /api/ps and /api/generate stop at their deadline despite a trickle", async () => {
+test("elapsed deadlines: the fresh probe, /api/ps and /api/generate stop at their deadline despite a trickle", { timeout: 30_000 }, async () => {
   await withSlowServer(async (url) => {
     const probe = await elapsed(lam.probeEngine({ id: "ollama", endpoint: url, api: "ollama", model: MODEL }, { timeoutMs: 300 }));
     assert.equal(probe.out.status, lam.STATUSES.STOPPED);
@@ -651,6 +659,67 @@ test("legacy database from e26e36a: additive migration, old tasks keep their has
     assert.equal(s.getTask(m.id).target, MODEL);
     assert.equal(s.verifyAudit(m.id).ok, true);
   } finally {
+    s.close();
+    fs.rmSync(tdir, { recursive: true, force: true });
+  }
+});
+
+test("cancelling during preflight (before task.start) succeeds and the run then refuses to dispatch", async () => {
+  // Reproduces the PR #9 re-review finding: pause the fresh probe, cancel,
+  // then release the probe. No POST may reach the engine.
+  const tdir = fs.mkdtempSync(path.join(os.tmpdir(), "nytedesk-mc-preflight-"));
+  const s = openStore({ file: path.join(tdir, "db") });
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  let probing = false;
+  const gatedProbe = async (...args) => {
+    probing = true;
+    await gate;
+    return lam.probeEngine(...args);
+  };
+  ollama.loaded.clear();
+  try {
+    const svc = createService(s, { env, probe: gatedProbe, probeOptions: { timeoutMs: 1000 } });
+    svc.putEngine(USERS[1], "ollama", { expectedVersion: 0, endpoint: `http://127.0.0.1:${engine.address().port}` }, newKey());
+    await lam.probeEngine({ id: "ollama", endpoint: `http://127.0.0.1:${engine.address().port}`, api: "ollama" }).then((c) => s.saveEngineCheck("ollama", USERS[2], c));
+    const mk = (target) => {
+      const c = svc.createTask(USERS[3], WORKSPACES[0], { description: "l", adapter: "ollama", action: cp.ACTIONS.ENGINE_MODEL_LOAD, target }, newKey()).body.task;
+      return svc.decide(USERS[2], c, "approve", { expectedVersion: c.version, payloadHash: c.payloadHash }, newKey()).body.task;
+    };
+    const t = mk(MODEL);
+    const other = mk(OTHER);
+    const since = ollama.requests.length;
+    const pending = svc.runTask(USERS[1], t, { expectedVersion: t.version });
+    while (!probing) await new Promise((r) => setTimeout(r, 5));
+
+    // Preflight: still approved, not owned, cancellable; the lock is held.
+    const d = svc.getTask(USERS[3], s.getTask(t.id));
+    assert.equal(d.task.status, "approved");
+    assert.equal(d.operationInFlight, false);
+    assert.equal(d.canCancel, true);
+    const od = svc.getTask(USERS[1], s.getTask(other.id));
+    assert.equal(od.canRun, false);
+    assert.equal(od.runBlockedReason, "Another model operation is running");
+    await assert.rejects(svc.runTask(USERS[1], other, { expectedVersion: other.version }), /Another model operation is running/);
+
+    const cancelled = svc.cancel(USERS[3], s.getTask(t.id), { expectedVersion: t.version, reason: "changed my mind" }, newKey());
+    assert.equal(cancelled.status, 200);
+    assert.equal(cancelled.body.task.status, "cancelled");
+
+    release();
+    await assert.rejects(pending, (e) => e.status === 409);
+    // The engine got only the read-only probe (and possibly /api/ps), never the POST.
+    assert.ok(!engineCalls(since).includes("POST /api/generate"), engineCalls(since).join(", "));
+    const after = svc.getTask(USERS[1], s.getTask(t.id));
+    assert.equal(after.task.status, "cancelled");
+    assert.deepEqual(after.audit.map((e) => e.event), ["task.created", "task.approve", "task.cancel"]);
+    assert.equal(after.auditVerified, true);
+    // The lock was released by the refused run (startTask threw after the lock was taken).
+    const r = await svc.runTask(USERS[1], other, { expectedVersion: other.version });
+    assert.equal(r.task.status, "succeeded");
+  } finally {
+    release();
+    ollama.loaded.clear();
     s.close();
     fs.rmSync(tdir, { recursive: true, force: true });
   }

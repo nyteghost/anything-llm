@@ -294,12 +294,19 @@ function createService(store, options = {}) {
   const telemetry = options.telemetry ?? createTelemetry();
   const modelOps = options.modelControl ?? mc;
   const probe = options.probe ?? lam.probeEngine;
-  // One model operation at a time across this server. While set, the live
-  // operation owns `taskId`: it alone may finish that task, and cancelling it
-  // is refused, so the engine's outcome is always recorded. A `running` task
-  // that no live operation owns (e.g. after a crash) can still be cancelled.
+  // Two separate things:
+  // - `liveOperation` is the server-wide lock: one model operation at a time,
+  //   held for the whole run (preflight checks included).
+  // - `dispatchedTaskId` is ownership: set only once startTask has succeeded,
+  //   immediately before the request is sent, and cleared when the outcome is
+  //   recorded. While a task is owned, cancelling it is refused so the
+  //   engine's outcome is always recorded. Before that (preflight), the task
+  //   is still `approved` and may be cancelled; startTask's transactional
+  //   reauthorization then refuses to dispatch. A `running` task that no live
+  //   operation owns (e.g. after a crash) can still be cancelled.
   let liveOperation = null;
-  const ownsTask = (task) => liveOperation?.taskId === task.id;
+  let dispatchedTaskId = null;
+  const ownsTask = (task) => dispatchedTaskId === task.id;
 
   const modelControlEnabled = () => env.NYTEDESK_MODEL_CONTROL === "true";
   const isEngineControl = (task) =>
@@ -614,6 +621,9 @@ function createService(store, options = {}) {
           expectedVersion: task.version,
           executionEnabled: true,
         });
+        // From here until the outcome is recorded, this operation owns the
+        // task (no await between startTask and this assignment).
+        dispatchedTaskId = task.id;
         let result;
         try {
           result = await modelOps.runModelOperation(
@@ -655,6 +665,7 @@ function createService(store, options = {}) {
         });
         return { task: publicTask(done), result: evidence };
       } finally {
+        dispatchedTaskId = null;
         liveOperation = null;
       }
     },

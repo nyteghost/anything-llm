@@ -64,6 +64,10 @@ With it off, everything behaves exactly as in the PR #7 owner verification:
 
 **What the refusals change:** any refusal before step 3's start leaves the task `approved` and sends no load or unload request.
 
+**Cancellation before dispatch (preflight):** the server-wide lock is held for the whole run, but the task is only *owned* once `startTask` succeeds.
+- During preflight (the fresh probe and the `/api/ps` read), the task is still `approved`, `operationInFlight` is false, and an authorized cancel succeeds.
+- When preflight finishes, `startTask`'s transactional reauthorization refuses to dispatch (409). No load or unload request is sent, and the lock is released.
+
 **Cancellation after dispatch:** from `task.start` until the outcome is recorded, the live operation **owns** the task.
 - Cancelling it is refused with 409 ("in flight"), for the requester, managers and admins alike, so the engine's outcome is always recorded as `task.succeed` or `task.fail`.
 - The detail reports `operationInFlight: true` and `canCancel: false`. The inspector says that cancelling is refused until the engine answers.
@@ -92,14 +96,15 @@ A refused redirect closes the connection immediately instead of draining the bod
   - The propose form gets a model picker fed by the last Ollama check.
   - The inspector gets a model row, honest execution text and the outcome evidence. The "Load/Unload *model* now" button is shown only when the server reports `canRun`; otherwise the inspector shows `runBlockedReason`. It also explains what cancellation can do while the task is `running`.
 - **Tests:**
-  - New `tests/fork/nytedesk-model-control.test.cjs` (23 tests) runs against a stateful fake Ollama. It covers the setting off, proposal validation, refusals (requester, default role, unapproved, agent action, stale version), a successful load/unload with the exact engine calls and payloads, already-loaded and not-loaded, an engine that errors or doesn't change state, concurrency, an expired approval, the immutable target, legacy hash compatibility, and the process route.
+  - New `tests/fork/nytedesk-model-control.test.cjs` (24 tests) runs against a stateful fake Ollama. It covers the setting off, proposal validation, refusals (requester, default role, unapproved, agent action, stale version), a successful load/unload with the exact engine calls and payloads, already-loaded and not-loaded, an engine that errors or doesn't change state, concurrency, an expired approval, the immutable target, legacy hash compatibility, and the process route.
   - It also has the review regression tests:
     - cancel refused while in flight, with the outcome recorded;
     - cancel allowed for a stranded `running` task;
+    - cancel during preflight succeeds, and the paused run then refuses to dispatch (no POST) and releases the lock;
     - run eligibility and its reasons, including an expired approval;
     - an executor error fails the task and releases the lock;
     - a task probe for model B doesn't touch the selection evidence for model A, and mismatched evidence is rejected;
-    - elapsed deadlines against a trickling local double;
+    - elapsed deadlines against a trickling local double, which has its own 2.5 s cutoff so a regression fails in seconds instead of hanging;
     - immediate redirect close in both clients;
     - the size limit;
     - loopback-only endpoints;
