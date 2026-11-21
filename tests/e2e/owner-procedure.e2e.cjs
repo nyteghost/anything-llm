@@ -333,6 +333,7 @@ async function main() {
     await admin.goto(`${BASE}/nytedesk/logs`);
     await admin.getByText("Disabled (engines are externally owned)").waitFor();
     await admin.goto(`${BASE}/nytedesk/agentbridge`);
+    await admin.getByText("vm-isolation-verified", { exact: true }).waitFor();
     assert.equal(await admin.getByText("Not verified", { exact: true }).count(), 5);
     ok("§7.3: Logs show execution disabled; AgentBridge lists all five preconditions Not verified");
 

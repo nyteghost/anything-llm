@@ -668,6 +668,9 @@ function CommandBar({ workspaces = [] }) {
 /**
  * Main panel and a right sidebar with a draggable, keyboard-operable divider.
  * The width persists; below the lg breakpoint the sidebar stacks underneath.
+ * One element structure for both layouts (only classes change), so the main
+ * panel, including the embedded chat and any text typed into it, is never
+ * remounted when the window crosses the breakpoint.
  */
 export function ResizableSplit({ main, side, width, onWidth, sideLabel }) {
   const isWide = useMediaQuery("(min-width: 1024px)");
@@ -677,17 +680,6 @@ export function ResizableSplit({ main, side, width, onWidth, sideLabel }) {
   const available = () =>
     containerRef.current?.getBoundingClientRect().width ?? Infinity;
   const setWidth = (w) => onWidth(clampRightWidth(w, available()));
-
-  if (!isWide) {
-    return (
-      <div className="flex flex-col gap-4">
-        <div className="min-h-[60vh] flex">{main}</div>
-        <aside aria-label={sideLabel} className="flex flex-col gap-4">
-          {side}
-        </aside>
-      </div>
-    );
-  }
 
   const onPointerDown = (e) => {
     e.preventDefault();
@@ -718,9 +710,18 @@ export function ResizableSplit({ main, side, width, onWidth, sideLabel }) {
   return (
     <div
       ref={containerRef}
-      className={`flex h-full min-h-0 ${dragging ? "select-none cursor-col-resize" : ""}`}
+      data-split-layout={isWide ? "side-by-side" : "stacked"}
+      className={
+        isWide
+          ? `flex h-full min-h-0 ${dragging ? "select-none cursor-col-resize" : ""}`
+          : "flex flex-col gap-4"
+      }
     >
-      <div className="flex-1 min-w-0 min-h-0 flex">{main}</div>
+      <div
+        className={isWide ? "flex-1 min-w-0 min-h-0 flex" : "min-h-[60vh] flex"}
+      >
+        {main}
+      </div>
       <div
         role="separator"
         aria-orientation="vertical"
@@ -728,7 +729,8 @@ export function ResizableSplit({ main, side, width, onWidth, sideLabel }) {
         aria-valuemin={RIGHT_MIN}
         aria-valuemax={RIGHT_MAX}
         aria-valuenow={width}
-        tabIndex={0}
+        aria-hidden={isWide ? undefined : "true"}
+        tabIndex={isWide ? 0 : -1}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
@@ -736,14 +738,18 @@ export function ResizableSplit({ main, side, width, onWidth, sideLabel }) {
         onDoubleClick={() => setWidth(RIGHT_DEFAULT)}
         onKeyDown={onKeyDown}
         title="Drag, or use the arrow keys, to resize. Double-click to reset."
-        className="group w-3 shrink-0 cursor-col-resize flex items-stretch justify-center outline-none"
+        className={`group w-3 shrink-0 cursor-col-resize items-stretch justify-center outline-none ${isWide ? "flex" : "hidden"}`}
       >
         <span className="w-px bg-white/10 light:bg-slate-200 group-hover:bg-indigo-400 group-focus-visible:bg-indigo-400 group-focus-visible:w-0.5" />
       </div>
       <aside
         aria-label={sideLabel}
-        className="shrink-0 min-h-0 overflow-y-auto flex flex-col gap-4"
-        style={{ width }}
+        className={
+          isWide
+            ? "shrink-0 min-h-0 overflow-y-auto flex flex-col gap-4"
+            : "flex flex-col gap-4"
+        }
+        style={isWide ? { width } : undefined}
       >
         {side}
       </aside>
