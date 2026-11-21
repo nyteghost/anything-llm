@@ -66,6 +66,9 @@ export default function ChatPanel({
   };
 
   const selection = engines?.selection;
+  const coordinator = selection
+    ? `Coordinator: ${ENGINE_NAMES[selection.engineId] || selection.engineId}${selection.model ? ` · ${selection.model}` : ""}`
+    : "No coordinator engine selected";
   return (
     <section
       aria-labelledby="nd-chat-title"
@@ -95,12 +98,10 @@ export default function ChatPanel({
           </label>
         )}
         <span
-          className="text-xs rounded-md border border-white/10 light:border-slate-200 px-2 py-1"
-          title="The coordinator engine selected in Local AI Manager. This chat answers with the workspace's own LLM setting."
+          className="text-xs rounded-md border border-white/10 light:border-slate-200 px-2 py-1 max-w-[16rem] truncate"
+          title={`${coordinator}. The coordinator engine is selected in Local AI Manager; this chat answers with the workspace's own LLM setting.`}
         >
-          {selection
-            ? `Coordinator: ${ENGINE_NAMES[selection.engineId] || selection.engineId}${selection.model ? ` · ${selection.model}` : ""}`
-            : "No coordinator engine selected"}
+          {coordinator}
         </span>
         {active && (
           <Link

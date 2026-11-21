@@ -168,3 +168,11 @@ test("the embedded chat is AnythingLLM's own workspace chat component", () => {
   assert.match(chat, /import \{ default as WorkspaceChatContainer \} from "@\/components\/WorkspaceChat"/);
   assert.match(chat, /<WorkspaceChatContainer\s+loading=/);
 });
+
+test("the account button is placed inside the dashboard top bar, which reserves room", () => {
+  const css = read("frontend/src/index.css");
+  assert.match(css, /div:has\(> \.nytedesk-app\) > div\.absolute:first-child \{\s*top: 0\.625rem;\s*right: 1rem;/);
+  const shell = app("Shell.jsx");
+  assert.match(shell, /className="nytedesk-app /);
+  assert.match(shell, /pr-16 md:pr-20 h-14/);
+});

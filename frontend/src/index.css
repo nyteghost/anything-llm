@@ -718,6 +718,16 @@ dialog::backdrop {
 }
 
 /*
+ * NyteDesk dashboard: AnythingLLM's account button (rendered by PrivateRoute
+ * just before the page) sits inside the dashboard's top bar, which reserves
+ * room for it. Scoped to pages whose root is .nytedesk-app.
+ */
+div:has(> .nytedesk-app) > div.absolute:first-child {
+  top: 0.625rem;
+  right: 1rem;
+}
+
+/*
  * Chat font-size slider: inside the chat history, headings, tables and code
  * blocks scale with the chosen size. The em values reproduce the fixed sizes
  * above exactly at the 14px default (32, 24, 18, 13 and 14px).

@@ -38,7 +38,7 @@ export function DashboardSection({ data, layout, updateLayout }) {
         telemetry={data.telemetry}
         now={data.now}
       />
-      <div className="lg:flex-1 lg:min-h-[420px]">
+      <div className="lg:flex-1 lg:min-h-[600px]">
         <ResizableSplit
           sideLabel="Activity sidebar"
           width={layout.rightWidth}

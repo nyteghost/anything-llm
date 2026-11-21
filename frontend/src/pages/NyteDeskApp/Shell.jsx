@@ -184,7 +184,13 @@ function Nav({
         : "None selected",
       ok: !!selection && reachable,
     },
-    { label: "Execution", value: "Disabled (VM unverified)", ok: false },
+    {
+      label: "Execution",
+      value: "Disabled",
+      title:
+        "Disabled until the VM and the other execution preconditions are verified",
+      ok: false,
+    },
     {
       label: "Health",
       value: !selection
@@ -288,7 +294,11 @@ function Nav({
             aria-label="System status"
           >
             {status.map((s) => (
-              <p key={s.label} className="flex items-center gap-2">
+              <p
+                key={s.label}
+                className="flex items-center gap-2"
+                title={s.title}
+              >
                 <span
                   aria-hidden="true"
                   className={`w-2 h-2 rounded-full ${s.ok ? "bg-emerald-400" : "bg-zinc-500"}`}
@@ -324,7 +334,7 @@ function Nav({
 
 function TopBar({ title, showMenuButton, onMenu, workspaces }) {
   return (
-    <header className="shrink-0 flex items-center gap-3 px-3 md:px-6 h-14 border-b border-white/10 light:border-slate-200">
+    <header className="shrink-0 flex items-center gap-3 pl-3 md:pl-6 pr-16 md:pr-20 h-14 border-b border-white/10 light:border-slate-200">
       {showMenuButton && (
         <button
           type="button"
