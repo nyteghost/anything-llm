@@ -217,7 +217,10 @@ jobs:
       - name: Guide §5 (Stage 4) - launch with tools/linux-run.sh
         run: |
           export NYTEDESK_ENABLED=true
-          nohup tools/linux-run.sh > "$RUNNER_TEMP/launcher.log" 2>&1 &
+          # Background jobs of a non-interactive shell inherit SIGINT as ignored,
+          # and bash cannot re-enable it. Restore the default first so the
+          # launcher sees Ctrl+C (SIGINT) exactly as in the owner's terminal.
+          nohup python3 -c 'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' tools/linux-run.sh > "$RUNNER_TEMP/launcher.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/launcher.pid"
           for i in $(seq 1 1500); do
             grep -q "Your fork is ready: http://127.0.0.1:3002" "$RUNNER_TEMP/launcher.log" && break
