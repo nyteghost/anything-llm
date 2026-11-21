@@ -2,7 +2,7 @@
 
 - **Branch:** `feature/nytedesk-dashboard-ui`
 - **Draft PR:** #7, base `feature/nytedesk-stabilization-local-ai` (PR #6)
-- **Code verified at:** `0a6a2be16f385638eba8bb2fd00cafa8060a27dd`. The commit that adds this document changes only documentation. The PR body gives the final head.
+- **Code verified at:** `dfe63bc4b270a99816bece5b8692ba9e743dae0a`, after the independent-review corrections (§9). The first round was verified at `0a6a2be`. The commit that updates this document changes only documentation. The PR body gives the final head.
 - **Design reference:** the owner-approved Gemini dashboard concept.
 - **Author:** Claude. **Requested reviewer:** Codex CLI or the owner. The author has not approved his own work.
 
@@ -56,7 +56,7 @@ Sections: Dashboard, AI Workspace, Local AI Manager (the PR #6 panel), AgentBrid
    - cancelled → Cancelled
 
    "Proposed" and "Independently verified" appear in the legend as **not tracked yet** and are never shown for a task. Provenance gives requester, approver and last event.
-6. **Telemetry.** `GET /api/nytedesk/telemetry` (authenticated, gated, `no-store`) reads only Node's `os` counters: CPU % (needs two samples) and RAM of the NyteDesk server host, with `sampledAt`. The UI shows "Updated Ns ago" and marks samples older than 30s as stale. GPU utilization, VRAM, GPU temperature, tokens/s and context usage show **Unavailable**, with the reason. Nothing is executed (no `nvidia-smi`), and a test enforces that.
+6. **Telemetry.** `GET /api/nytedesk/telemetry` (authenticated, gated, `no-store`, **managers and administrators only**, see §9 F5) reads only Node's `os` counters: CPU % (needs two samples) and RAM of the NyteDesk server host, with `sampledAt`. The UI shows "Updated Ns ago" and marks samples older than 30s as stale. GPU utilization, VRAM, GPU temperature, tokens/s and context usage show **Unavailable**, with the reason. Nothing is executed (no `nvidia-smi`), and a test enforces that.
 
 ## 3. Verification (CI at `0a6a2be`)
 
@@ -140,3 +140,33 @@ Screenshots of the running implementation (17) are uploaded as the `nytedesk-das
 3. A focus trap in the mobile drawer; an axe and contrast scan; Safari and Firefox passes.
 4. Restyle the reused "Propose a task" form.
 5. Owner check in the dedicated VM, and Codex review.
+
+## 9. Independent review corrections (review comment 7054452838)
+
+Verdict received: changes requested; 5 should-fix and 1 nit; no authorization or execution bypass found. All are addressed in `dfe63bc`.
+
+| Finding | Correction | Regression tests |
+|---|---|---|
+| **F1** Review confirmation not tied to the inspected task | The confirmation is bound to the exact task `id`, `version` and `payloadHash` (`reviewBinding` and `reviewMatches`), so any other revision voids it. A task change clears the shown detail, reason, keys and confirmation. Loads are sequenced (`createSequencer`), so a late response for an earlier task is dropped, and a response whose task id differs is ignored. Approve re-checks the binding before sending. The task reloads when the window regains focus, so a server-side change voids the confirmation. The server still decides. | Unit: binding, out-of-order loads. Source: reset effect and guards. **e2e:** A→B client-side navigation leaves B unconfirmed with Approve disabled; a 2 s delayed response for A does not replace B. |
+| **F2** Dashboard data can stay stale | Tasks, approvals and engines refresh every 30 s while the tab is visible, and on window focus or visibility (at most once per 5 s). Runs are single-flight. A failed refresh keeps the last good data. The top bar shows loading, refreshing, fresh, stale (over 90 s) and failed states with the last success time (`role="status"`), plus a manual refresh. The telemetry lifecycle is unchanged. | Unit: single-flight, freshness states. Source: intervals, focus, cleanup. **e2e:** a task created by another user appears after focus; a simulated 500 shows "failed", keeps the data, and recovers to "fresh". |
+| **F3** Mobile drawer focus | Opening moves focus into the drawer, and Tab/Shift+Tab cycle inside it. The page content and AnythingLLM's account button are `inert` and `aria-hidden` while it is open. Escape and the backdrop close it, focus returns to the opener, and the drawer closes when the viewport grows to desktop. | Source checks. **e2e at 390×844:** 16 Tab and 16 Shift+Tab presses stay inside; background and account button are inert; Escape restores focus to "Open navigation" and removes inert; backdrop click closes. |
+| **F4** CI reproducibility and log exposure | `playwright-core` is pinned to **1.63.0** in `tests/e2e/package.json` plus a lockfile with a sha512 integrity hash, installed with `npm ci --ignore-scripts` (both browser jobs). Base64 screenshot output was removed from the logs. Screenshots are kept only as the workflow artifact (7 days, seeded test data only). | Source check on the workflow and lockfile. CI shows `added 1 package` from the lockfile in both jobs. |
+| **F5** Telemetry visible to all users | Manager/admin-only, enforced in `service.telemetry()` (403, nothing returned). The UI does not request it for other roles and shows "Restricted". The policy is documented in `NYTEDESK_CONTROL_PLANE.md` for the owner to confirm. | Fork: 401 without a token, 403 for a default user, 200 for manager and admin, gates still apply. Jest (real JWT): 403 for default, 200 for manager and admin. **e2e:** the default user sees "Restricted", and a direct API call gets 403. |
+| **Nit** Structure-dependent `:has()` selector | AnythingLLM's `UserButton` has a `data-user-menu` attribute, and the dashboard sets `body.nytedesk-route` only while mounted. The CSS is `.nytedesk-route [data-user-menu]`, with no `:has()` and no dependence on DOM position. | Source check. **e2e:** bounding boxes on desktop (1440×900) and mobile (390×844) show the account button clear of the text-size control and inside the top bar. |
+
+### Verification at `dfe63bc` (CI)
+
+| Check | Run | Result |
+|---|---|---|
+| Lint, server and frontend | 44846936271 | ✅ |
+| Backend Jest | 44846936238 | ✅ 2570 passed, 5 skipped, 0 failed |
+| Fork tests (`focused-tests`) | 44846936287 | ✅ 129/129 |
+| Production `vite build` (`frontend-build`) | 44846936287 | ✅ 6222 modules |
+| Browser harness | 44846936287 | ✅ 5/5 (pinned driver) |
+| **Real app in Chrome** (`dashboard-e2e`) | 44846936287 | ✅ 24/24; screenshots artifact 14682819902 (expires 2026-11-28) |
+
+### Limits
+
+- Claude could not open the new screenshot artifact: this sandbox's network blocks GitHub's artifact storage, and screenshots are no longer printed into logs, by design. The corrected behaviour is verified by e2e assertions, not by Claude viewing images.
+- `tabindex` and `inert` handling assumes a browser with `inert` support (Chrome 102+, Safari 15.5+, Firefox 112+).
+- Still not done: the owner's hardware or engines, a screen reader, an axe or contrast scan, Safari and Firefox.
