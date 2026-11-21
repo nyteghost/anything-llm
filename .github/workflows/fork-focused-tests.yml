@@ -169,9 +169,11 @@ jobs:
     env:
       PR7_ACCEPTED: 1d2706897de03966dc52519363036330d86507bc
       PR7_HEAD: d8fd85920abc995e1dbf21eaf4cad9d0a8d09b95
-      MOCK_LOG: ${{ runner.temp }}/engine-requests.jsonl
-      EVIDENCE: ${{ runner.temp }}/owner-procedure-evidence
     steps:
+      - name: Rehearsal paths
+        run: |
+          echo "MOCK_LOG=$RUNNER_TEMP/engine-requests.jsonl" >> "$GITHUB_ENV"
+          echo "EVIDENCE=$RUNNER_TEMP/owner-procedure-evidence" >> "$GITHUB_ENV"
       - name: Check out source (full history for the guide's diff check)
         uses: actions/checkout@v4
         with:
