@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { isMobile } from "react-device-detect";
+import { Link } from "react-router-dom";
 import Sidebar from "@/components/SettingsSidebar";
 import CTAButton from "@/components/lib/CTAButton";
 import useUser from "@/hooks/useUser";
@@ -187,6 +188,12 @@ function Header() {
         NyteDesk
       </p>
       <p className={muted}>{TEXT.intro}</p>
+      <Link
+        to="/nytedesk"
+        className="self-start text-sm underline text-theme-text-primary"
+      >
+        Open the NyteDesk dashboard
+      </Link>
     </div>
   );
 }
@@ -301,7 +308,7 @@ const EMPTY_TASK = {
   description: "",
 };
 
-function CreateTask({ workspaces, onCreated }) {
+export function CreateTask({ workspaces, onCreated }) {
   const [form, setForm] = useState(EMPTY_TASK);
   // One key per intended task: a retry after a network error re-sends the
   // same key, so the server returns the task it already created.
