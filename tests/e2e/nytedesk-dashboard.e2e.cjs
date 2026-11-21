@@ -316,8 +316,9 @@ async function main() {
       window.history.pushState({}, "", target);
       window.dispatchEvent(new PopStateEvent("popstate"));
     }, `/workspace/${s.slug}`);
+    // The dashboard's embedded chat also has a textarea: wait for the route change itself.
+    await page.waitForFunction(() => !document.querySelector(".nytedesk-app"), null, { timeout: 20000 });
     await page.locator("textarea").first().waitFor({ timeout: 20000 });
-    assert.equal(await page.locator(".nytedesk-app").count(), 0, "dashboard unmounted");
     assert.equal(await page.evaluate(() => document.body.classList.contains("nytedesk-route")), false);
     const tasksAtUnmount = taskRequests.n;
     telemetryRequests.n = 0;
