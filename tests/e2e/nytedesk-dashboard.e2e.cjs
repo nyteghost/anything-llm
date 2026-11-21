@@ -34,6 +34,8 @@ const USERS = {
 };
 const results = [];
 const pageErrors = [];
+const consoleErrors = [];
+let lastPage = null; // for failure diagnostics
 
 function ok(name) {
   results.push(name);
@@ -141,6 +143,8 @@ async function signIn(browser, u, options = {}) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: "dark", ...options });
   const page = await context.newPage();
   page.on("pageerror", (e) => pageErrors.push(`${u.username}: ${e.message}`));
+  page.on("console", (m) => m.type() === "error" && consoleErrors.push(`${u.username}: ${m.text()}`));
+  lastPage = page;
   await page.goto(`${BASE}/login`);
   await page.locator('input[name="username"]').first().fill(u.username);
   await page.locator('input[name="password"]').first().fill(u.password);
@@ -318,6 +322,9 @@ async function main() {
     assert.equal(await mobile.page.getByRole("dialog", { name: "Navigation" }).count(), 0);
     ok("mobile: no horizontal overflow; the navigation drawer opens and closes with Escape");
     await mobile.context.close();
+  } catch (e) {
+    await diagnose();
+    throw e;
   } finally {
     await browser.close();
     poly.close();
@@ -329,8 +336,23 @@ async function main() {
   console.log(`# pass ${results.length}`);
 }
 
-main().catch((e) => {
+async function diagnose() {
+  if (!lastPage || lastPage.isClosed()) return;
+  try {
+    console.error(`URL at failure: ${lastPage.url()}`);
+    const text = await lastPage.evaluate(() => document.body?.innerText || "");
+    console.error(`Page text at failure:\n${text.slice(0, 3000)}`);
+    await lastPage.screenshot({ path: path.join(SHOTS, "zz-failure.png") });
+  } catch (e) {
+    console.error(`(diagnostics failed: ${e.message})`);
+  }
+}
+
+main().catch(async (e) => {
   console.error(e);
+  await diagnose();
+  console.error(`Page errors:\n${pageErrors.join("\n") || "(none)"}`);
+  console.error(`Console errors:\n${consoleErrors.slice(0, 30).join("\n") || "(none)"}`);
   console.error(`# failed after ${results.length} passing checks`);
   process.exit(1);
 });
