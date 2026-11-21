@@ -186,7 +186,7 @@ test("text size reuses the shared control instead of a new implementation", () =
 
 test("resizable split is keyboard-operable and nav collapse persists", () => {
   const shell = app("Shell.jsx");
-  assert.match(shell, /role="separator"[\s\S]{0,400}tabIndex=\{0\}/);
+  assert.match(shell, /role="separator"[\s\S]{0,400}tabIndex=\{isWide \? 0 : -1\}/);
   for (const key of ["ArrowLeft", "ArrowRight", "Home", "End"]) assert.ok(shell.includes(`"${key}"`), key);
   assert.match(shell, /updateLayout\(\{ navCollapsed: !layout\.navCollapsed \}\)/);
   assert.match(shell, /useMediaQuery\("\(min-width: 1024px\)"\)/);           // stacks below lg
@@ -471,4 +471,20 @@ test("the inspector's model outcome messages match the server's model-control me
   for (const [code, text] of Object.entries(ts.MODEL_OUTCOME_MESSAGES)) {
     assert.equal(mc.DIAGNOSTICS[code], text, code);
   }
+});
+
+test("the split keeps one element structure, so the chat never remounts on resize", () => {
+  const shell = app("Shell.jsx");
+  const split = shell.split("export function ResizableSplit")[1];
+  assert.doesNotMatch(split, /if \(!isWide\) \{?\s*return/);                 // no separate narrow tree
+  assert.equal((split.match(/return \(/g) || []).length, 1);
+  assert.match(split, /data-split-layout=\{isWide \? "side-by-side" : "stacked"\}/);
+  assert.match(split, /\$\{isWide \? "flex" : "hidden"\}/);                   // class, not [hidden]
+});
+
+test("D1: the propose-task form submits with a real submit button", () => {
+  const legacy = read("frontend/src/pages/NyteDesk/index.jsx");
+  const form = legacy.split("export function CreateTask")[1].split("function Approvals")[0];
+  assert.doesNotMatch(form, /<CTAButton[^>]*onClick=\{submit\}/);
+  assert.match(form, /<button\s+type="submit"/);
 });

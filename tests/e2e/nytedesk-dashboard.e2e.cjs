@@ -350,6 +350,18 @@ async function main() {
     ok("sidebar resizes from the keyboard and the width persists across reload");
     await shot(page, "02-dashboard-sidebar-widened");
 
+    // Typed chat text survives crossing the 1024px breakpoint (the chat is not remounted).
+    const chatBox = page.getByRole("region", { name: "AI chat workspace and agent playground" }).locator("textarea").first();
+    await chatBox.fill("draft that must survive a resize");
+    await page.setViewportSize({ width: 900, height: 900 });
+    await page.waitForFunction(() => document.querySelector("[data-split-layout]")?.dataset.splitLayout === "stacked");
+    assert.equal(await chatBox.inputValue(), "draft that must survive a resize");
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.waitForFunction(() => document.querySelector("[data-split-layout]")?.dataset.splitLayout === "side-by-side");
+    assert.equal(await chatBox.inputValue(), "draft that must survive a resize");
+    await chatBox.fill("");
+    ok("typed chat text survives resizing across the 1024px breakpoint (no remount)");
+
     await page.getByRole("button", { name: "Collapse navigation" }).click();
     await page.reload();
     await page.getByRole("button", { name: "Expand navigation" }).waitFor();

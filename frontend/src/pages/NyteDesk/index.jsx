@@ -416,9 +416,15 @@ export function CreateTask({ workspaces, onCreated }) {
           onChange={set("description")}
         />
         <div>
-          <CTAButton disabled={busy} onClick={submit}>
+          {/* A real submit button: CTAButton calls onClick() without the
+              event, so submit(e) would throw before the implicit submit. */}
+          <button
+            type="submit"
+            disabled={busy}
+            className="border-none text-xs px-4 py-1 font-semibold light:text-[#ffffff] rounded-lg bg-primary-button hover:bg-secondary hover:text-white h-[34px] w-fit disabled:opacity-50"
+          >
             {busy ? "Submitting…" : "Submit for approval"}
-          </CTAButton>
+          </button>
         </div>
       </form>
     </Section>
