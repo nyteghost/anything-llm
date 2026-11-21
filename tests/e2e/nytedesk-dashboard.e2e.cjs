@@ -221,7 +221,7 @@ async function main() {
     ok("no process-control buttons");
 
     // AnythingLLM's account button sits in the top bar without covering its controls.
-    const account = await page.locator("div:has(> .nytedesk-app) > div.absolute:first-child").boundingBox();
+    const account = await page.locator("[data-user-menu]").boundingBox();
     const textSizeButton = await page.getByRole("banner").getByRole("button", { name: /text size/i }).boundingBox();
     const banner = await page.getByRole("banner").boundingBox();
     assert.ok(account && textSizeButton, "account and text-size buttons are visible");
@@ -232,6 +232,38 @@ async function main() {
     await page.getByRole("region", { name: "AI chat workspace and agent playground" }).waitFor();
     await page.locator("textarea").first().waitFor({ timeout: 20000 });
     ok("embedded AnythingLLM workspace chat renders with its prompt input");
+    // F2: dashboard data refreshes when another session changes it.
+    const freshness = page.locator("[data-freshness]");
+    assert.equal(await freshness.getAttribute("data-freshness"), "fresh");
+    const pending = async () => Number((await overview.innerText()).match(/Pending approvals\s*(\d+)/)[1]);
+    const before = await pending();
+    await api("POST", `/nytedesk/workspaces/${s.slug}/tasks`, {
+      token: s.viewer.token,
+      body: { adapter: "codex", action: "repository.read", description: "Created from another session to test dashboard refresh." },
+    });
+    await page.waitForTimeout(5500); // focus refresh is throttled to one per 5 s
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await page.waitForFunction(
+      (n) => new RegExp(`Pending approvals\\s*${n}\\b`).test(document.querySelector('[aria-label="Overview"]').innerText),
+      before + 1,
+      { timeout: 10000 }
+    );
+    ok("F2: a task created in another session appears after the window regains focus");
+
+    // A failed refresh keeps the last good data and says so; recovery returns to fresh.
+    const tasksApi = /\/api\/nytedesk\/tasks\?/;
+    await page.route(tasksApi, (route) =>
+      route.fulfill({ status: 500, contentType: "application/json", body: '{"error":"simulated outage"}' })
+    );
+    await page.getByRole("button", { name: /Refresh dashboard data/ }).click();
+    await page.waitForFunction(() => document.querySelector("[data-freshness]")?.dataset.freshness === "failed");
+    assert.match(await freshness.innerText(), /Refresh failed; showing data from/);
+    assert.equal(await pending(), before + 1);
+    await page.unroute(tasksApi);
+    await page.getByRole("button", { name: /Refresh dashboard data/ }).click();
+    await page.waitForFunction(() => document.querySelector("[data-freshness]")?.dataset.freshness === "fresh");
+    ok("F2: a failed refresh is shown as failed, keeps the last good data, and recovers");
+
     await page.waitForTimeout(10500); // let a second telemetry sample arrive (CPU needs two)
     await shot(page, "01-dashboard-desktop-1440x900");
 
@@ -278,6 +310,39 @@ async function main() {
     assert.equal(await approve.isDisabled(), false);
     await shot(page, "05-approval-inspector-admin");
     ok("inspector shows all six sections; Approve stays disabled until the review is confirmed");
+
+    // F1: moving from task A to task B in the same view never carries the review over.
+    const A = s.protectedTask;
+    const B = s.standardTask;
+    const go = (p) =>
+      page.evaluate((target) => {
+        window.history.pushState({}, "", target);
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      }, p);
+    await page.goto(`${BASE}/nytedesk/approvals/${A.id}`);
+    await page.getByText(A.description).waitFor();
+    await page.getByRole("checkbox").check();
+    assert.equal(await page.getByRole("button", { name: "Approve" }).isDisabled(), false);
+    await go(`/nytedesk/approvals/${B.id}`);
+    await page.getByText(B.description).waitFor();
+    assert.equal(await page.getByRole("checkbox").isChecked(), false);
+    assert.equal(await page.getByRole("button", { name: "Approve" }).isDisabled(), true);
+    ok("F1: the review confirmation for task A does not carry over to task B");
+
+    // A slow, older response for A must not replace B.
+    const slowA = new RegExp(`/api/nytedesk/tasks/${A.id}$`);
+    await page.route(slowA, async (route) => {
+      await new Promise((r) => setTimeout(r, 2000));
+      await route.continue();
+    });
+    await go(`/nytedesk/approvals/${A.id}`);
+    await go(`/nytedesk/approvals/${B.id}`);
+    await page.getByText(B.description).waitFor();
+    await page.waitForTimeout(2600);
+    assert.equal(await page.getByText(B.description).count(), 1);
+    assert.equal(await page.getByText(A.description).count(), 0);
+    await page.unroute(slowA);
+    ok("F1: a late response for an earlier task is ignored");
 
     // Approve the standard task through the UI and see the state change.
     await page.goto(`${BASE}/nytedesk/approvals/${s.standardTask.id}`);
@@ -339,6 +404,18 @@ async function main() {
 
     // ---------------- default user: read-only
     const v = await signIn(browser, USERS.viewer);
+    await v.page.goto(`${BASE}/nytedesk`);
+    await v.page.getByText("Host metrics are available to managers and administrators.").waitFor();
+    assert.match(await v.page.getByRole("region", { name: "Overview" }).innerText(), /System health\s*Restricted/);
+    const direct = await v.page.evaluate(async () => {
+      const r = await fetch("/api/nytedesk/telemetry", {
+        headers: { Authorization: `Bearer ${localStorage.getItem("anythingllm_authToken")}` },
+      });
+      return { status: r.status, body: await r.json() };
+    });
+    assert.equal(direct.status, 403);
+    assert.equal(direct.body.telemetry, undefined);
+    ok("F5: a default user gets no host telemetry, in the UI or from a direct API request");
     await v.page.goto(`${BASE}/nytedesk/approvals/${s.protectedTask.id}`);
     await v.page.getByText("Only an administrator", { exact: false }).or(v.page.getByText("Your role cannot approve", { exact: false })).first().waitFor();
     assert.equal(await v.page.getByRole("button", { name: "Approve" }).count(), 0);
@@ -361,12 +438,43 @@ async function main() {
     const width = await mobile.page.evaluate(() => document.documentElement.scrollWidth);
     assert.ok(width <= 390, `no horizontal overflow on mobile (scrollWidth ${width})`);
     await shot(mobile.page, "16-dashboard-mobile-390x844");
-    await mobile.page.getByRole("button", { name: "Open navigation" }).click();
+    const mAccount = await mobile.page.locator("[data-user-menu]").boundingBox();
+    const mTextSize = await mobile.page.getByRole("banner").getByRole("button", { name: /text size/i }).boundingBox();
+    assert.equal(overlaps(mAccount, mTextSize), false, "mobile: account button covers the text-size button");
+
+    // F3: keyboard-only use of the modal drawer.
+    const opener = mobile.page.getByRole("button", { name: "Open navigation" });
+    await opener.focus();
+    await mobile.page.keyboard.press("Enter");
     await mobile.page.getByRole("dialog", { name: "Navigation" }).waitFor();
+    const focusInside = () => mobile.page.evaluate(() => !!document.activeElement?.closest('[role="dialog"]'));
+    assert.equal(await focusInside(), true, "focus moves into the drawer");
+    for (let i = 0; i < 16; i++) {
+      await mobile.page.keyboard.press("Tab");
+      assert.equal(await focusInside(), true, `Tab ${i + 1} left the drawer`);
+    }
+    for (let i = 0; i < 16; i++) {
+      await mobile.page.keyboard.press("Shift+Tab");
+      assert.equal(await focusInside(), true, `Shift+Tab ${i + 1} left the drawer`);
+    }
+    const inert = () =>
+      mobile.page.evaluate(() => ({
+        content: !!document.getElementById("nytedesk-main")?.closest("[inert]"),
+        account: !!document.querySelector("[data-user-menu]")?.inert,
+      }));
+    assert.deepEqual(await inert(), { content: true, account: true });
     await shot(mobile.page, "17-mobile-navigation-drawer");
     await mobile.page.keyboard.press("Escape");
     assert.equal(await mobile.page.getByRole("dialog", { name: "Navigation" }).count(), 0);
-    ok("mobile: no horizontal overflow; the navigation drawer opens and closes with Escape");
+    assert.equal(await mobile.page.evaluate(() => document.activeElement?.getAttribute("aria-label")), "Open navigation");
+    assert.deepEqual(await inert(), { content: false, account: false });
+    ok("F3: drawer traps Tab/Shift+Tab, makes the page inert, and Escape returns focus to the opener");
+
+    // Backdrop dismissal still works.
+    await opener.click();
+    await mobile.page.mouse.click(370, 400);
+    assert.equal(await mobile.page.getByRole("dialog", { name: "Navigation" }).count(), 0);
+    ok("mobile: no horizontal overflow; backdrop dismissal works; account button clear of controls");
     await mobile.context.close();
   } catch (e) {
     await diagnose();

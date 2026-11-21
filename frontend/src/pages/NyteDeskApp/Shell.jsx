@@ -14,6 +14,7 @@ import {
   CaretDoubleLeft,
   CaretDoubleRight,
   MagnifyingGlass,
+  ArrowsClockwise,
   List as MenuIcon,
   X,
 } from "@phosphor-icons/react";
@@ -25,6 +26,7 @@ import {
   RIGHT_MAX,
   RIGHT_MIN,
   clampRightWidth,
+  dataFreshness,
   readLayout,
   writeLayout,
 } from "@/utils/nytedesk/layout";
@@ -50,6 +52,17 @@ export const SECTIONS = [
 
 export const sectionPath = (id) =>
   id === "dashboard" ? "/nytedesk" : `/nytedesk/${id}`;
+
+const FOCUSABLE =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/** Keyboard-focusable elements inside `root`, in document order. */
+export function focusableIn(root) {
+  if (!root) return [];
+  return [...root.querySelectorAll(FOCUSABLE)].filter(
+    (el) => el.tabIndex !== -1 && !el.closest("[inert]")
+  );
+}
 
 export function useMediaQuery(query) {
   const get = () =>
@@ -85,18 +98,80 @@ export default function Shell({
   layout,
   updateLayout,
   workspaces,
+  sync,
+  now,
+  onRefresh,
   children,
 }) {
   const isDesktop = useMediaQuery("(min-width: 768px)");
   const [drawerOpen, setDrawerOpen] = useState(false);
   const collapsed = isDesktop && layout.navCollapsed;
+  const contentRef = useRef(null);
+  const drawerRef = useRef(null);
+  const openerRef = useRef(null);
+  const drawerModal = drawerOpen && !isDesktop;
+
+  // Lets index.css place AnythingLLM's account button in this top bar.
+  useEffect(() => {
+    document.body.classList.add("nytedesk-route");
+    return () => document.body.classList.remove("nytedesk-route");
+  }, []);
 
   useEffect(() => {
-    if (!drawerOpen) return undefined;
-    const onKey = (e) => e.key === "Escape" && setDrawerOpen(false);
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [drawerOpen]);
+    if (isDesktop) setDrawerOpen(false);
+  }, [isDesktop]);
+
+  // Modal drawer: the rest of the page is inert, Tab cycles inside the drawer,
+  // Escape closes it, and focus returns to the control that opened it.
+  useEffect(() => {
+    if (!drawerModal) return undefined;
+    const background = [
+      contentRef.current,
+      document.querySelector("[data-user-menu]"),
+    ].filter(Boolean);
+    for (const el of background) {
+      el.inert = true;
+      el.setAttribute("aria-hidden", "true");
+    }
+    const focusables = () => focusableIn(drawerRef.current);
+    focusables()[0]?.focus();
+    const onKey = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setDrawerOpen(false);
+        return;
+      }
+      if (e.key !== "Tab") return;
+      const list = focusables();
+      if (!list.length) return;
+      const first = list[0];
+      const last = list[list.length - 1];
+      const active = document.activeElement;
+      const inside = drawerRef.current?.contains(active);
+      if (e.shiftKey && (active === first || !inside)) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && (active === last || !inside)) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("keydown", onKey, true);
+      for (const el of background) {
+        el.inert = false;
+        el.removeAttribute("aria-hidden");
+      }
+      const opener = openerRef.current;
+      if (opener && document.contains(opener)) opener.focus();
+    };
+  }, [drawerModal]);
+
+  const openDrawer = () => {
+    openerRef.current = document.activeElement;
+    setDrawerOpen(true);
+  };
 
   const nav = (
     <Nav
@@ -125,8 +200,9 @@ export default function Shell({
           {nav}
         </div>
       )}
-      {!isDesktop && drawerOpen && (
+      {drawerModal && (
         <div
+          ref={drawerRef}
           className="fixed inset-0 z-50 flex"
           role="dialog"
           aria-modal="true"
@@ -137,18 +213,22 @@ export default function Shell({
           </div>
           <button
             type="button"
+            tabIndex={-1}
             aria-label="Close navigation"
             className="flex-1 bg-black/60"
             onClick={() => setDrawerOpen(false)}
           />
         </div>
       )}
-      <div className="flex-1 min-w-0 h-full flex flex-col">
+      <div ref={contentRef} className="flex-1 min-w-0 h-full flex flex-col">
         <TopBar
           title={title}
           showMenuButton={!isDesktop}
-          onMenu={() => setDrawerOpen(true)}
+          onMenu={openDrawer}
           workspaces={workspaces}
+          sync={sync}
+          now={now}
+          onRefresh={onRefresh}
         />
         <main
           id="nytedesk-main"
@@ -332,7 +412,59 @@ function Nav({
   );
 }
 
-function TopBar({ title, showMenuButton, onMenu, workspaces }) {
+const FRESHNESS_TONE = {
+  fresh: "text-zinc-400 light:text-slate-500",
+  refreshing: "text-zinc-400 light:text-slate-500",
+  loading: "text-zinc-400 light:text-slate-500",
+  stale: "text-amber-300 light:text-amber-700",
+  failed: "text-red-300 light:text-red-700",
+};
+
+/** When the dashboard data last loaded, and a manual refresh. */
+function DataFreshness({ sync, now, onRefresh }) {
+  const f = dataFreshness(sync, now);
+  return (
+    <div className="flex items-center gap-1.5 shrink-0">
+      <span
+        role="status"
+        aria-live="polite"
+        data-freshness={f.state}
+        className={`hidden lg:inline text-xs ${FRESHNESS_TONE[f.state]}`}
+        title={
+          sync?.lastSuccessAt
+            ? `Last successful refresh: ${sync.lastSuccessAt}`
+            : undefined
+        }
+      >
+        {f.label}
+      </span>
+      <button
+        type="button"
+        onClick={onRefresh}
+        disabled={sync?.refreshing}
+        aria-label={`Refresh dashboard data. ${f.label}`}
+        title={f.label}
+        className={`p-1.5 rounded-md hover:bg-white/5 light:hover:bg-slate-100 disabled:opacity-50 ${f.state === "failed" || f.state === "stale" ? FRESHNESS_TONE[f.state] : ""}`}
+      >
+        <ArrowsClockwise
+          size={16}
+          aria-hidden="true"
+          className={sync?.refreshing ? "animate-spin" : ""}
+        />
+      </button>
+    </div>
+  );
+}
+
+function TopBar({
+  title,
+  showMenuButton,
+  onMenu,
+  workspaces,
+  sync,
+  now,
+  onRefresh,
+}) {
   return (
     <header className="shrink-0 flex items-center gap-3 pl-3 md:pl-6 pr-16 md:pr-20 h-14 border-b border-white/10 light:border-slate-200">
       {showMenuButton && (
@@ -349,6 +481,7 @@ function TopBar({ title, showMenuButton, onMenu, workspaces }) {
       <div className="flex-1 flex justify-center min-w-0">
         <CommandBar workspaces={workspaces} />
       </div>
+      {sync && <DataFreshness sync={sync} now={now} onRefresh={onRefresh} />}
       <TextSizeMenu className="relative z-30" allowOnMobile={true} />
     </header>
   );

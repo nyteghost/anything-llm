@@ -52,6 +52,7 @@ export function KpiCards({
   approvals,
   components,
   telemetry,
+  telemetryAllowed = true,
   now,
 }) {
   const selection = engines?.selection;
@@ -120,20 +121,30 @@ export function KpiCards({
         to="/nytedesk/agentbridge"
         detail={<span className={muted}>0 active · execution disabled</span>}
       />
-      <Kpi
-        label="System health"
-        value={
-          telemetry?.host?.cpuPercent != null
-            ? `CPU ${telemetry.host.cpuPercent}%`
-            : "Measuring…"
-        }
-        to="/nytedesk/logs"
-        detail={
-          <span className={fresh?.stale ? "text-amber-300" : muted}>
-            {telemetry ? `GPU unavailable · ${fresh.label}` : "No sample yet"}
-          </span>
-        }
-      />
+      {telemetryAllowed ? (
+        <Kpi
+          label="System health"
+          value={
+            telemetry?.host?.cpuPercent != null
+              ? `CPU ${telemetry.host.cpuPercent}%`
+              : "Measuring…"
+          }
+          to="/nytedesk/logs"
+          detail={
+            <span className={fresh?.stale ? "text-amber-300" : muted}>
+              {telemetry ? `GPU unavailable · ${fresh.label}` : "No sample yet"}
+            </span>
+          }
+        />
+      ) : (
+        <Kpi
+          label="System health"
+          value="Restricted"
+          detail={
+            <span className={muted}>Managers and administrators only</span>
+          }
+        />
+      )}
     </section>
   );
 }
@@ -201,7 +212,21 @@ function Metric({ label, children }) {
   );
 }
 
-export function MetricsPanel({ telemetry, telemetryError, now }) {
+export function MetricsPanel({
+  telemetry,
+  telemetryError,
+  telemetryAllowed = true,
+  now,
+}) {
+  if (!telemetryAllowed) {
+    return (
+      <Card title="System metrics" labelledBy="nd-metrics">
+        <p className={`text-xs ${muted}`}>
+          Host metrics are available to managers and administrators.
+        </p>
+      </Card>
+    );
+  }
   const fresh = telemetry ? freshness(telemetry.sampledAt, now) : null;
   const h = telemetry?.host;
   const memPct = h ? (100 * h.memoryUsedBytes) / h.memoryTotalBytes : null;

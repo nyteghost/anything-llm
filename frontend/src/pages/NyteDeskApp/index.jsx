@@ -41,7 +41,7 @@ const VIEWS = {
 export default function NyteDeskApp() {
   const { section = "dashboard", taskId } = useParams();
   const { user } = useUser();
-  const data = useNyteDesk();
+  const data = useNyteDesk(user?.role);
   const [layout, updateLayout] = useLayout();
   const active = VIEWS[section] ? section : "dashboard";
   const View = VIEWS[active];
@@ -86,6 +86,9 @@ export default function NyteDeskApp() {
       layout={layout}
       updateLayout={updateLayout}
       workspaces={data.workspaces}
+      sync={data.ready ? data.sync : null}
+      now={data.now}
+      onRefresh={data.refresh}
     >
       {data.error && data.ready && (
         <p

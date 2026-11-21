@@ -179,3 +179,40 @@ export function provenance(task, audit = []) {
   }
   return lines;
 }
+
+/**
+ * What a person confirmed they reviewed: one exact task revision. Any change
+ * of task, version or payload hash makes the confirmation void.
+ */
+export function reviewBinding(task) {
+  if (!task) return null;
+  return { id: task.id, version: task.version, payloadHash: task.payloadHash };
+}
+
+export function reviewMatches(binding, task) {
+  return (
+    !!binding &&
+    !!task &&
+    binding.id === task.id &&
+    binding.version === task.version &&
+    binding.payloadHash === task.payloadHash
+  );
+}
+
+/**
+ * Sequencer for overlapping loads: `begin()` returns a token, and `isCurrent`
+ * is true only for the newest token, so a slow response for an earlier
+ * request can never replace a newer one.
+ */
+export function createSequencer() {
+  let latest = 0;
+  return {
+    begin() {
+      latest += 1;
+      return latest;
+    },
+    isCurrent(token) {
+      return token === latest;
+    },
+  };
+}

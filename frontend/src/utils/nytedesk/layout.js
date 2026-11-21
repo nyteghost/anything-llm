@@ -60,3 +60,58 @@ export function freshness(sampledAt, now = Date.now(), staleAfterMs = 30_000) {
   const label = s < 60 ? `${s}s ago` : `${Math.round(s / 60)}m ago`;
   return { ageMs, stale: ageMs > staleAfterMs, label };
 }
+
+export const DATA_REFRESH_MS = 30_000;
+export const DATA_STALE_MS = 90_000;
+export const FOCUS_REFRESH_MIN_MS = 5_000;
+
+/**
+ * Wraps an async function so overlapping calls share one run: a call made
+ * while a run is in flight gets that run's promise instead of starting another.
+ */
+export function createSingleFlight(fn) {
+  let running = null;
+  return () => {
+    if (!running) {
+      running = Promise.resolve()
+        .then(fn)
+        .finally(() => {
+          running = null;
+        });
+    }
+    return running;
+  };
+}
+
+/**
+ * State of the dashboard data for the freshness indicator: loading (nothing
+ * yet), refreshing, failed (last attempt failed; older data may be shown),
+ * stale (last success older than DATA_STALE_MS) or fresh.
+ */
+export function dataFreshness(
+  { lastSuccessAt = null, lastError = null, refreshing = false } = {},
+  now = Date.now(),
+  staleAfterMs = DATA_STALE_MS
+) {
+  const t = Date.parse(lastSuccessAt);
+  const has = Number.isFinite(t);
+  const age = has ? freshness(lastSuccessAt, now, staleAfterMs) : null;
+  if (!has) {
+    if (lastError)
+      return { state: "failed", label: `Could not load: ${lastError}` };
+    return { state: "loading", label: "Loading…" };
+  }
+  if (refreshing)
+    return {
+      state: "refreshing",
+      label: `Refreshing… (data from ${age.label})`,
+    };
+  if (lastError)
+    return {
+      state: "failed",
+      label: `Refresh failed; showing data from ${age.label}`,
+    };
+  if (age.stale)
+    return { state: "stale", label: `Stale: updated ${age.label}` };
+  return { state: "fresh", label: `Updated ${age.label}` };
+}

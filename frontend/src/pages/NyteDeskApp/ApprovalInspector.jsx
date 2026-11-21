@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   ArrowLeft,
@@ -10,8 +10,11 @@ import NyteDesk from "@/models/nytedesk";
 import showToast from "@/utils/toast";
 import {
   ACTION_INFO,
+  createSequencer,
   describeAdapter,
   provenance,
+  reviewBinding,
+  reviewMatches,
   riskLevel,
 } from "@/utils/nytedesk/taskState";
 import { Badge, Card, StateBadge, muted } from "./ui";
@@ -31,12 +34,18 @@ export default function ApprovalInspector({
   const [detail, setDetail] = useState(null);
   const [error, setError] = useState(null);
   const [reason, setReason] = useState("");
-  const [reviewed, setReviewed] = useState(false);
+  // The exact task revision the person confirmed; see reviewBinding().
+  const [reviewedFor, setReviewedFor] = useState(null);
   const [busy, setBusy] = useState(false);
   const [keys, setKeys] = useState(() => newKeys());
+  const sequencer = useRef(createSequencer());
 
+  // Loads are sequenced: only the newest request may update the view, so a
+  // slow response for a task the person already left is dropped.
   const load = useCallback(async () => {
+    const token = sequencer.current.begin();
     const r = await NyteDesk.task(taskId);
+    if (!sequencer.current.isCurrent(token)) return;
     if (!r.ok) {
       setError(
         r.status === 404
@@ -46,12 +55,34 @@ export default function ApprovalInspector({
       setDetail(null);
       return;
     }
+    if (r.data?.task?.id !== taskId) return;
     setError(null);
     setDetail(r.data);
   }, [taskId]);
 
+  // A different task starts from a clean slate: nothing reviewed, no reason,
+  // fresh idempotency keys, and no data from the previous task on screen.
   useEffect(() => {
+    setDetail(null);
+    setError(null);
+    setReviewedFor(null);
+    setReason("");
+    setKeys(newKeys());
     load();
+  }, [taskId, load]);
+
+  // Coming back to the window reloads the task; if it changed meanwhile, its
+  // new version or hash voids the earlier confirmation automatically.
+  useEffect(() => {
+    const onFocus = () => {
+      if (!document.hidden) load();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+    };
   }, [load]);
 
   if (error) {
@@ -64,7 +95,9 @@ export default function ApprovalInspector({
       </Card>
     );
   }
-  if (!detail) return <p className={`text-sm ${muted}`}>Loading task…</p>;
+  if (!detail || detail.task.id !== taskId) {
+    return <p className={`pt-4 text-sm ${muted}`}>Loading task…</p>;
+  }
 
   const { task, audit, auditVerified, auditProblems } = detail;
   const info = ACTION_INFO[task.action] || {
@@ -74,8 +107,12 @@ export default function ApprovalInspector({
   const risk = riskLevel(detail.protected);
   const target = describeAdapter(task.adapter);
   const blocked = decisionBlocker(detail, user);
+  const reviewed = reviewMatches(reviewedFor, task);
 
   const act = async (op) => {
+    // Approval needs a confirmation of exactly this revision, never an older one.
+    if (op === "approve" && !reviewMatches(reviewedFor, task)) return;
+    if (task.id !== taskId) return;
     setBusy(true);
     const r =
       op === "cancel"
@@ -90,7 +127,7 @@ export default function ApprovalInspector({
           : r.error,
         "error"
       );
-      setReviewed(false);
+      setReviewedFor(null);
       await load();
       return;
     }
@@ -98,7 +135,7 @@ export default function ApprovalInspector({
       op === "approve" ? "Approved" : op === "deny" ? "Rejected" : "Cancelled",
       "success"
     );
-    setReviewed(false);
+    setReviewedFor(null);
     setReason("");
     await load();
     onChanged?.();
@@ -235,7 +272,9 @@ export default function ApprovalInspector({
               <input
                 type="checkbox"
                 checked={reviewed}
-                onChange={(e) => setReviewed(e.target.checked)}
+                onChange={(e) =>
+                  setReviewedFor(e.target.checked ? reviewBinding(task) : null)
+                }
                 className="mt-1"
               />
               <span>

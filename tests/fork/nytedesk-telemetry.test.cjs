@@ -77,6 +77,8 @@ test("telemetry reads Node counters only: no processes, shell, files or network"
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "nytedesk-telemetry-"));
 after(() => fs.rmSync(dir, { recursive: true, force: true }));
 
+const ROLE_BY_TOKEN = { "Bearer admin": "admin", "Bearer manager": "manager", "Bearer user": "default" };
+
 async function start({ multiUser = true, enabled = true } = {}) {
   const store = openStore({ file: path.join(dir, `db-${Math.random()}.db`) });
   const service = createService(store);
@@ -85,7 +87,10 @@ async function start({ multiUser = true, enabled = true } = {}) {
     auth: [async (req, res, next) => (req.header("Authorization") ? next() : res.status(401).json({ error: "no token" }))],
     enabled: () => enabled,
     isMultiUser: async () => multiUser,
-    currentUser: async () => ({ id: 3, role: "default" }),
+    currentUser: async (req) => {
+      const role = ROLE_BY_TOKEN[req.header("Authorization")];
+      return role ? { id: { admin: 1, manager: 2, default: 3 }[role], role } : null;
+    },
     workspaceBySlug: async () => null,
     workspaceById: async () => null,
     accessibleWorkspaces: async () => [],
@@ -97,24 +102,33 @@ async function start({ multiUser = true, enabled = true } = {}) {
   return { base, close: () => new Promise((r) => { server.close(r); store.close(); }) };
 }
 
-test("telemetry and components routes: authenticated, gated, no caching", async () => {
+test("telemetry: managers and admins only (server-side), gated, no caching", async () => {
   const on = await start();
+  const get = (auth) => fetch(`${on.base}/nytedesk/telemetry`, auth ? { headers: { Authorization: auth } } : {});
   try {
-    assert.equal((await fetch(`${on.base}/nytedesk/telemetry`)).status, 401);
-    const r = await fetch(`${on.base}/nytedesk/telemetry`, { headers: { Authorization: "Bearer x" } });
-    assert.equal(r.status, 200);
-    assert.equal(r.headers.get("cache-control"), "no-store");
-    const { telemetry } = await r.json();
-    assert.equal(telemetry.source, "nytedesk-server-host");
-    assert.equal(telemetry.gpu.available, false);
-    const a = await (await fetch(`${on.base}/nytedesk/agents`, { headers: { Authorization: "Bearer x" } })).json();
+    assert.equal((await get()).status, 401);
+    const denied = await get("Bearer user");
+    assert.equal(denied.status, 403);
+    const body = await denied.json();
+    assert.match(body.error, /managers and administrators/);
+    assert.equal(body.telemetry, undefined);                       // nothing leaks with the refusal
+    for (const auth of ["Bearer manager", "Bearer admin"]) {
+      const r = await get(auth);
+      assert.equal(r.status, 200, auth);
+      assert.equal(r.headers.get("cache-control"), "no-store");
+      const { telemetry } = await r.json();
+      assert.equal(telemetry.source, "nytedesk-server-host");
+      assert.equal(telemetry.gpu.available, false);
+    }
+    // The role catalog stays readable by every signed-in user.
+    const a = await (await fetch(`${on.base}/nytedesk/agents`, { headers: { Authorization: "Bearer user" } })).json();
     assert.equal(a.components.find((c) => c.id === "polystrata").kind, "engine");
     assert.ok(Array.isArray(a.agents));
   } finally { await on.close(); }
   for (const opts of [{ multiUser: false }, { enabled: false }]) {
     const off = await start(opts);
     try {
-      const r = await fetch(`${off.base}/nytedesk/telemetry`, { headers: { Authorization: "Bearer x" } });
+      const r = await fetch(`${off.base}/nytedesk/telemetry`, { headers: { Authorization: "Bearer admin" } });
       assert.equal(r.status, 403, JSON.stringify(opts));
     } finally { await off.close(); }
   }

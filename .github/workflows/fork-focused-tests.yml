@@ -18,6 +18,7 @@ on:
       - "tests/fork/**"
       - "tests/browser/**"
       - "tests/e2e/**"
+      - "frontend/src/components/UserMenu/**"
       - "server/utils/nytedesk/**"
       - "server/endpoints/nytedesk.js"
       - "frontend/**"
@@ -87,11 +88,11 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "24"
-      - name: Install playwright-core (no browser download)
-        run: npm install --no-save --no-package-lock --prefix "$RUNNER_TEMP/pw" playwright-core@1
+      - name: Install the pinned browser driver (lockfile, integrity-checked)
+        run: npm ci --prefix tests/e2e --ignore-scripts --no-audit --no-fund
       - name: Chat font-size browser harness
         env:
-          NODE_PATH: ${{ runner.temp }}/pw/node_modules
+          NODE_PATH: ${{ github.workspace }}/tests/e2e/node_modules
           CHROME: /usr/bin/google-chrome
         run: node tests/browser/chat-font-size.browser.cjs
 
@@ -122,8 +123,8 @@ jobs:
           cd server
           npx prisma generate --schema=./prisma/schema.prisma
           npx prisma migrate deploy --schema=./prisma/schema.prisma
-      - name: Install playwright-core (no browser download)
-        run: npm install --no-save --no-package-lock --prefix "$RUNNER_TEMP/pw" playwright-core@1
+      - name: Install the pinned browser driver (lockfile, integrity-checked)
+        run: npm ci --prefix tests/e2e --ignore-scripts --no-audit --no-fund
       - name: Start server and run dashboard e2e
         env:
           NODE_ENV: production
@@ -144,26 +145,16 @@ jobs:
           export JWT_SECRET="$(openssl rand -hex 32)" SIG_KEY="$(openssl rand -hex 32)" SIG_SALT="$(openssl rand -hex 32)"
           export STORAGE_DIR="$GITHUB_WORKSPACE/server/storage"
           (cd server && nohup node index.js > "$RUNNER_TEMP/server.log" 2>&1 &)
-          NODE_PATH="$RUNNER_TEMP/pw/node_modules" node tests/e2e/nytedesk-dashboard.e2e.cjs
+          NODE_PATH="$GITHUB_WORKSPACE/tests/e2e/node_modules" node tests/e2e/nytedesk-dashboard.e2e.cjs
       - name: Server log (on failure)
         if: failure()
         run: tail -n 200 "$RUNNER_TEMP/server.log" || true
-      - name: Print screenshots into the log (for reviewers without artifact access)
-        if: always()
-        run: |
-          cd "$RUNNER_TEMP/nytedesk-screenshots" 2>/dev/null || exit 0
-          for f in *.png; do
-            out="${f%.png}.jpg"
-            ffmpeg -y -loglevel error -i "$f" -q:v 5 "$out" 2>/dev/null || out="$f"
-            echo "NYTEDESK-SHOT-BEGIN $out"
-            base64 -w 0 "$out"; echo
-            echo "NYTEDESK-SHOT-END"
-          done
       - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: nytedesk-dashboard-screenshots
           path: ${{ runner.temp }}/nytedesk-screenshots
-          retention-days: 14
+          # Seeded test data only; kept briefly and visible only to repository readers.
+          retention-days: 7
           if-no-files-found: warn

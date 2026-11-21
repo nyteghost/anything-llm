@@ -169,14 +169,21 @@ suite("NyteDesk API with real AnythingLLM authentication", () => {
     expect(change.status).toBe(403);
   });
 
-  it("serves telemetry and the role catalog only to authenticated users", async () => {
+  it("serves telemetry to managers/admins and the role catalog to signed-in users", async () => {
     expect((await call("GET", "/nytedesk/telemetry")).status).toBe(401);
     const forged = JWT.sign({ id: 1 }, "not-the-secret");
     expect(
       (await call("GET", "/nytedesk/telemetry", { auth: forged })).status
     ).toBe(401);
-    const t = await call("GET", "/nytedesk/telemetry", { auth: token(3) });
+    // Host telemetry is for managers and administrators only.
+    const denied = await call("GET", "/nytedesk/telemetry", { auth: token(3) });
+    expect(denied.status).toBe(403);
+    expect(denied.body.telemetry).toBeUndefined();
+    const t = await call("GET", "/nytedesk/telemetry", { auth: token(2) });
     expect(t.status).toBe(200);
+    expect(
+      (await call("GET", "/nytedesk/telemetry", { auth: token(1) })).status
+    ).toBe(200);
     expect(t.body.telemetry.source).toBe("nytedesk-server-host");
     expect(t.body.telemetry.gpu.available).toBe(false);
     expect(t.body.telemetry.gpu.vramUsedBytes).toBeNull();

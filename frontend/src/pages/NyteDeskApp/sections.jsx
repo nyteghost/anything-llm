@@ -36,6 +36,7 @@ export function DashboardSection({ data, layout, updateLayout }) {
         approvals={data.approvals}
         components={data.components}
         telemetry={data.telemetry}
+        telemetryAllowed={data.telemetryAllowed}
         now={data.now}
       />
       <div className="lg:flex-1 lg:min-h-[600px]">
@@ -59,6 +60,7 @@ export function DashboardSection({ data, layout, updateLayout }) {
               <MetricsPanel
                 telemetry={data.telemetry}
                 telemetryError={data.telemetryError}
+                telemetryAllowed={data.telemetryAllowed}
                 now={data.now}
               />
               <ActivityPanel tasks={data.tasks} now={data.now} />

@@ -325,9 +325,19 @@ function createService(store, options = {}) {
       return structuredClone(cp.COMPONENTS);
     },
 
-    /** Read-only host counters plus the selected engine; see telemetry.cjs. */
+    /**
+     * Read-only host counters plus the selected engine; see telemetry.cjs.
+     * Policy: host details (CPU count, memory) are for managers and
+     * administrators only. Enforced here, not only in the UI.
+     */
     telemetry(actor) {
       assertActor(actor);
+      if (!DECIDER_ROLES.includes(actor.role)) {
+        throw new NyteDeskError(
+          403,
+          "Host telemetry is limited to managers and administrators"
+        );
+      }
       const selection = store.getMeta(SELECTION_KEY);
       let engine = null;
       if (selection) {

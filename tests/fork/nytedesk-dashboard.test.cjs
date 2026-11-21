@@ -169,15 +169,144 @@ test("the embedded chat is AnythingLLM's own workspace chat component", () => {
   assert.match(chat, /<WorkspaceChatContainer\s+loading=/);
 });
 
-test("the account button is placed inside the dashboard top bar, which reserves room", () => {
+test("the account button uses a stable hook, not a structure-dependent :has() selector", () => {
   const css = read("frontend/src/index.css");
-  assert.match(css, /div:has\(> \.nytedesk-app\) > div\.absolute:first-child \{\s*top: 0\.625rem;\s*right: 1rem;/);
+  assert.match(css, /\.nytedesk-route \[data-user-menu\] \{\s*top: 0\.625rem;\s*right: 1rem;/);
+  assert.doesNotMatch(css, /:has\(> \.nytedesk-app\)/);
+  assert.match(read("frontend/src/components/UserMenu/UserButton/index.jsx"), /data-user-menu\s/);
   const shell = app("Shell.jsx");
-  assert.match(shell, /className="nytedesk-app /);
+  assert.match(shell, /document\.body\.classList\.add\("nytedesk-route"\)/);
+  assert.match(shell, /return \(\) => document\.body\.classList\.remove\("nytedesk-route"\)/);
   assert.match(shell, /pr-16 md:pr-20 h-14/);
 });
 
 test("engine card buttons cancel CTAButton's corner margin so they do not overlap", () => {
   const cards = read("frontend/src/pages/NyteDesk/LocalAIEngines.jsx");
   assert.equal((cards.match(/<CTAButton(?! className="!mr-0")/g) || []).length, 0);
+});
+
+// ------------------------------------------------------------------ F1: review binding
+test("F1: a review confirmation covers one exact task revision", () => {
+  const a = { id: "A", version: 2, payloadHash: "h1" };
+  const bound = ts.reviewBinding(a);
+  assert.equal(ts.reviewMatches(bound, a), true);
+  assert.equal(ts.reviewMatches(bound, { ...a, id: "B" }), false);          // other task
+  assert.equal(ts.reviewMatches(bound, { ...a, version: 3 }), false);       // changed since review
+  assert.equal(ts.reviewMatches(bound, { ...a, payloadHash: "h2" }), false); // other payload
+  assert.equal(ts.reviewMatches(null, a), false);
+  assert.equal(ts.reviewBinding(null), null);
+});
+
+test("F1: only the newest load may update the inspector (out-of-order responses)", async () => {
+  const seq = ts.createSequencer();
+  const shown = [];
+  const load = async (id, delayMs) => {
+    const token = seq.begin();
+    await new Promise((r) => setTimeout(r, delayMs));
+    if (seq.isCurrent(token)) shown.push(id);
+  };
+  await Promise.all([load("A", 40), load("B", 5)]);  // A is slower and older
+  assert.deepEqual(shown, ["B"]);
+});
+
+test("F1: the inspector resets on task change and guards submission", () => {
+  const src = app("ApprovalInspector.jsx");
+  assert.match(src, /useEffect\(\(\) => \{\s*setDetail\(null\);\s*setError\(null\);\s*setReviewedFor\(null\);\s*setReason\(""\);\s*setKeys\(newKeys\(\)\);\s*load\(\);\s*\}, \[taskId, load\]\)/);
+  assert.match(src, /if \(!sequencer\.current\.isCurrent\(token\)\) return;/);
+  assert.match(src, /if \(r\.data\?\.task\?\.id !== taskId\) return;/);
+  assert.match(src, /if \(!detail \|\| detail\.task\.id !== taskId\)/);
+  assert.match(src, /const reviewed = reviewMatches\(reviewedFor, task\);/);
+  assert.match(src, /if \(op === "approve" && !reviewMatches\(reviewedFor, task\)\) return;/);
+  assert.match(src, /setReviewedFor\(e\.target\.checked \? reviewBinding\(task\) : null\)/);
+  assert.doesNotMatch(src, /useState\(false\);\s*\/\/.*reviewed|setReviewed\(/);
+  assert.match(src, /window\.addEventListener\("focus", onFocus\)/);      // reload on return
+});
+
+// ------------------------------------------------------------------ F2: freshness
+test("F2: overlapping refreshes share one run", async () => {
+  let runs = 0;
+  let release;
+  const fn = () => { runs += 1; return new Promise((r) => { release = r; }); };
+  const flight = layout.createSingleFlight(fn);
+  const p1 = flight();
+  const p2 = flight();
+  assert.equal(p1, p2);
+  await Promise.resolve();
+  assert.equal(runs, 1);
+  release();
+  await p1;
+  const p3 = flight();
+  await Promise.resolve();
+  assert.equal(runs, 2);                                   // a later call starts a new run
+  release();
+  await p3;
+});
+
+test("F2: freshness distinguishes loading, refreshing, fresh, stale and failed", () => {
+  const now = Date.parse("2026-11-20T12:05:00Z");
+  const f = (o) => layout.dataFreshness(o, now);
+  assert.equal(f({}).state, "loading");
+  assert.equal(f({ lastError: "HTTP 500" }).state, "failed");
+  assert.match(f({ lastError: "HTTP 500" }).label, /Could not load: HTTP 500/);
+  assert.deepEqual(f({ lastSuccessAt: "2026-11-20T12:04:50Z" }), { state: "fresh", label: "Updated 10s ago" });
+  assert.equal(f({ lastSuccessAt: "2026-11-20T12:04:50Z", refreshing: true }).state, "refreshing");
+  assert.equal(f({ lastSuccessAt: "2026-11-20T12:02:00Z" }).state, "stale");
+  const failed = f({ lastSuccessAt: "2026-11-20T12:04:00Z", lastError: "HTTP 502" });
+  assert.equal(failed.state, "failed");
+  assert.match(failed.label, /showing data from 1m ago/);
+  assert.ok(layout.DATA_REFRESH_MS <= 60_000 && layout.DATA_REFRESH_MS >= 10_000);
+  assert.ok(layout.DATA_STALE_MS > layout.DATA_REFRESH_MS);
+});
+
+test("F2: the data hook polls while visible, refreshes on focus, and cleans up", () => {
+  const hook = app("useNyteDesk.js");
+  assert.match(hook, /setInterval\(tick, DATA_REFRESH_MS\)/);
+  assert.match(hook, /if \(!document\.hidden\) refresh\(\)/);
+  assert.match(hook, /window\.addEventListener\("focus", onFocus\)/);
+  assert.match(hook, /Date\.now\(\) - lastAttempt\.current < FOCUS_REFRESH_MIN_MS/);
+  assert.match(hook, /createSingleFlight\(load\)/);
+  assert.match(hook, /clearInterval\(id\);\s*window\.removeEventListener\("focus", onFocus\)/);
+  assert.match(hook, /tasks: t\.ok \? t\.data\.tasks \|\| \[\] : prev\.tasks/);   // keep last good data
+  const shell = app("Shell.jsx");
+  assert.match(shell, /role="status"\s+aria-live="polite"\s+data-freshness=\{f\.state\}/);
+  assert.match(shell, /aria-label=\{`Refresh dashboard data\. \$\{f\.label\}`\}/);
+});
+
+// ------------------------------------------------------------------ F3: drawer
+test("F3: the mobile drawer traps focus, makes the page inert and restores focus", () => {
+  const shell = app("Shell.jsx");
+  assert.match(shell, /el\.inert = true;\s*el\.setAttribute\("aria-hidden", "true"\)/);
+  assert.match(shell, /el\.inert = false;\s*el\.removeAttribute\("aria-hidden"\)/);
+  assert.match(shell, /document\.querySelector\("\[data-user-menu\]"\)/);   // account button too
+  assert.match(shell, /if \(opener && document\.contains\(opener\)\) opener\.focus\(\)/);
+  assert.match(shell, /if \(e\.key !== "Tab"\) return;/);
+  assert.match(shell, /openerRef\.current = document\.activeElement/);
+  assert.match(shell, /tabIndex=\{-1\}\s+aria-label="Close navigation"/);       // backdrop: mouse only
+  assert.match(shell, /if \(isDesktop\) setDrawerOpen\(false\)/);
+});
+
+// ------------------------------------------------------------------ F5: telemetry UI
+test("F5: the dashboard asks for host telemetry only for managers and admins", () => {
+  const hook = app("useNyteDesk.js");
+  assert.match(hook, /const TELEMETRY_ROLES = \["admin", "manager"\]/);
+  assert.match(hook, /if \(!ready \|\| !telemetryAllowed\) return undefined;/);
+  const widgets = app("widgets.jsx");
+  assert.match(widgets, /Host metrics are available to managers and administrators\./);
+  assert.match(widgets, /value="Restricted"/);
+});
+
+// ------------------------------------------------------------------ F4: CI
+test("F4: the browser driver is pinned by lockfile and screenshots stay out of logs", () => {
+  const pkg = JSON.parse(read("tests/e2e/package.json"));
+  assert.equal(pkg.devDependencies["playwright-core"], "1.63.0");
+  const lock = JSON.parse(read("tests/e2e/package-lock.json"));
+  const entry = lock.packages["node_modules/playwright-core"];
+  assert.equal(entry.version, "1.63.0");
+  assert.match(entry.integrity, /^sha512-[A-Za-z0-9+/]+={0,2}$/);
+  assert.match(entry.resolved, /^https:\/\/registry\.npmjs\.org\//);
+  const wf = read(".github/workflows/fork-focused-tests.yml");
+  assert.doesNotMatch(wf, /playwright-core@/);
+  assert.equal((wf.match(/npm ci --prefix tests\/e2e --ignore-scripts/g) || []).length, 2);
+  assert.doesNotMatch(wf, /base64|NYTEDESK-SHOT/);
+  assert.match(wf, /retention-days: 7/);
 });
