@@ -158,3 +158,142 @@ jobs:
           # Seeded test data only; kept briefly and visible only to repository readers.
           retention-days: 7
           if-no-files-found: warn
+
+  # CI rehearsal of NYTEDESK_OWNER_VERIFICATION.md: the guide's own commands,
+  # the repository launcher (tools/linux-run.sh), mock engines on the tunnel
+  # ports, and the owner's browser procedure (§6–§7). CI-simulated only: no
+  # real engines, no owner hardware. No repository secrets are used.
+  owner-procedure-rehearsal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PR7_ACCEPTED: 1d2706897de03966dc52519363036330d86507bc
+      PR7_HEAD: d8fd85920abc995e1dbf21eaf4cad9d0a8d09b95
+    steps:
+      - name: Rehearsal paths
+        run: |
+          echo "MOCK_LOG=$RUNNER_TEMP/engine-requests.jsonl" >> "$GITHUB_ENV"
+          echo "EVIDENCE=$RUNNER_TEMP/owner-procedure-evidence" >> "$GITHUB_ENV"
+      - name: Check out source (full history for the guide's diff check)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Guide §2 (Stage 1) - checkout checks and launcher --check
+        run: |
+          mkdir -p "$EVIDENCE"
+          echo "rehearsal checkout: $(git rev-parse HEAD)"
+          echo "PR #7 head vs accepted code (guide expects only .md files):"
+          git diff --stat "$PR7_ACCEPTED" "$PR7_HEAD"
+          if git diff --name-only "$PR7_ACCEPTED" "$PR7_HEAD" | grep -v '\.md$'; then echo "non-docs change in PR #7 head"; exit 1; fi
+          test ! -e server/.env && echo "OK: no server/.env yet"
+          tools/linux-run.sh --check | tee "$EVIDENCE/01-launcher-check.txt"
+          find "$HOME" -mindepth 1 -maxdepth 2 | sort > "$RUNNER_TEMP/home-before.txt"
+      - name: Guide §3 (Stage 2) - toolchain and fork tests
+        run: |
+          tools/linux-run.sh --check-toolchain
+          TOOLCHAIN="$PWD/server/storage/.fork-toolchain/node_modules/node-linux-x64/bin"
+          [ -x "$TOOLCHAIN/node" ] && export PATH="$TOOLCHAIN:$PATH"
+          node --version
+          node --test tests/fork/*.test.cjs 2>&1 | tail -n 8 | tee "$EVIDENCE/02-fork-tests.txt"
+          grep -q "fail 0" "$EVIDENCE/02-fork-tests.txt"
+      - name: Guide §4 stand-in - mock engines on the tunnel ports
+        run: |
+          nohup node tests/e2e/mock-engines.cjs > "$RUNNER_TEMP/mock-engines.log" 2>&1 &
+          for i in $(seq 1 20); do curl -fsS -o /dev/null http://127.0.0.1:41434/api/tags && break; sleep 0.5; done
+          cat "$RUNNER_TEMP/mock-engines.log"
+      - name: Guide §4.3 - read-only checks through the "tunnels" (verbatim)
+        run: |
+          {
+          curl -sS -m 5 -o /dev/null -w 'ollama via tunnel HTTP %{http_code}\n' http://127.0.0.1:41434/api/tags
+          curl -sS -m 5 -o /dev/null -w 'polystrata via tunnel HTTP %{http_code}\n' http://127.0.0.1:41537/v1/models
+          curl -sS -m 5 -o /dev/null -w 'strata via tunnel HTTP %{http_code}\n' http://127.0.0.1:41600/models
+          } | tee "$EVIDENCE/03-engines-before.txt"
+          test "$(grep -c 'HTTP 200' "$EVIDENCE/03-engines-before.txt")" = 3
+      - name: Guide §5 (Stage 4) - launch with tools/linux-run.sh
+        run: |
+          export NYTEDESK_ENABLED=true
+          # Background jobs of a non-interactive shell inherit SIGINT as ignored,
+          # and bash cannot re-enable it. Restore the default first so the
+          # launcher sees Ctrl+C (SIGINT) exactly as in the owner's terminal.
+          nohup python3 -c 'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' tools/linux-run.sh > "$RUNNER_TEMP/launcher.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/launcher.pid"
+          for i in $(seq 1 1500); do
+            grep -q "Your fork is ready: http://127.0.0.1:3002" "$RUNNER_TEMP/launcher.log" && break
+            kill -0 "$(cat "$RUNNER_TEMP/launcher.pid")" 2>/dev/null || { tail -n 60 "$RUNNER_TEMP/launcher.log"; exit 1; }
+            sleep 1
+          done
+          grep -q "Your fork is ready" "$RUNNER_TEMP/launcher.log" || { tail -n 60 "$RUNNER_TEMP/launcher.log"; exit 1; }
+          grep -E "Your fork is ready|Keep this terminal open" "$RUNNER_TEMP/launcher.log"
+          echo "listening sockets (expect 127.0.0.1 only for 3002/8889):"
+          ss -ltn | grep -E ':(3002|8889)\b' | tee "$EVIDENCE/04-listeners.txt"
+          if grep -vE '127\.0\.0\.1:(3002|8889)' "$EVIDENCE/04-listeners.txt"; then echo "listening beyond loopback"; exit 1; fi
+      - name: Install the pinned browser driver (lockfile, integrity-checked)
+        run: npm ci --prefix tests/e2e --ignore-scripts --no-audit --no-fund
+      - name: Guide §6-§7 - owner procedure in Chrome
+        env:
+          BASE_URL: http://127.0.0.1:3002
+          CHROME: /usr/bin/google-chrome
+          SHOTS_DIR: ${{ runner.temp }}/owner-procedure-evidence/screenshots
+        run: NODE_PATH="$GITHUB_WORKSPACE/tests/e2e/node_modules" node tests/e2e/owner-procedure.e2e.cjs
+      - name: Guide §7.4 - no nvidia-smi or shell children of the server
+        run: |
+          ps -eo pid,ppid,args | grep -E '[n]ode index.js|[n]vidia-smi' | tee "$EVIDENCE/05-processes.txt"
+          if grep -q 'nvidia-smi' "$EVIDENCE/05-processes.txt"; then echo "nvidia-smi found"; exit 1; fi
+          SERVER_PIDS=$(pgrep -f 'node index.js' | tr '\n' ' ')
+          for p in $SERVER_PIDS; do
+            if ps -o args= --ppid "$p" | grep -E 'nvidia-smi|(^|/)(ba|z|fi)?sh( |$)'; then echo "unexpected child of $p"; exit 1; fi
+          done
+          echo "no nvidia-smi or shell children"
+      - name: Engine traffic was read-only (mock request log)
+        run: |
+          node -e '
+            const lines = require("fs").readFileSync(process.env.MOCK_LOG, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
+            const tally = {};
+            for (const r of lines) { const k = `${r.engine} ${r.method} ${r.path.split("?")[0]}`; tally[k] = (tally[k] || 0) + 1; }
+            console.log(JSON.stringify(tally, null, 2));
+            const loading = /\/(api\/(generate|chat|embed|embeddings|pull|push|create|copy|delete)|v1\/(chat\/)?completions|v1\/embeddings)/;
+            const bad = lines.filter((r) => loading.test(r.path) || (r.method !== "GET" && !(r.engine === "ollama" && r.method === "POST" && r.path === "/api/show")));
+            const nytedeskOnly = lines.filter((r) => r.engine !== "ollama");
+            if (bad.length) { console.error("non-read-only engine requests:", bad); process.exit(1); }
+            if (nytedeskOnly.some((r) => r.method !== "GET")) { console.error("NyteDesk sent a non-GET request"); process.exit(1); }
+            console.log(`OK: ${lines.length} engine requests, all read-only (GET; plus AnythingLLM onboarding model metadata POST /api/show to Ollama, if any)`);
+          ' | tee "$EVIDENCE/06-engine-traffic.txt"
+      - name: Guide §8 - evidence commands
+        run: |
+          { echo "date: $(date -Is)"; echo "head: $(git rev-parse HEAD)"; echo "accepted code: $PR7_ACCEPTED"; uname -sr; } > "$EVIDENCE/00-environment.txt"
+          tools/linux-run.sh --check-toolchain >> "$EVIDENCE/00-environment.txt" 2>&1
+          grep -iE 'error|nytedesk' server/storage/fork-logs/server.log | tail -n 200 > "$EVIDENCE/07-server-log-excerpt.txt" || true
+          ps -eo pid,rss,etime,args | grep '[n]ode index.js' > "$EVIDENCE/08-server-rss.txt"
+          cat "$EVIDENCE/00-environment.txt"
+      - name: Guide §9 - shutdown with Ctrl+C (SIGINT) and verify cleanup
+        run: |
+          kill -INT "$(cat "$RUNNER_TEMP/launcher.pid")"
+          for i in $(seq 1 30); do kill -0 "$(cat "$RUNNER_TEMP/launcher.pid")" 2>/dev/null || break; sleep 1; done
+          if kill -0 "$(cat "$RUNNER_TEMP/launcher.pid")" 2>/dev/null; then echo "launcher still running"; exit 1; fi
+          node -e 'const net=require("net");(async()=>{for(const p of [3002,8889])await new Promise((ok,no)=>{const s=net.createServer();s.once("error",()=>no(new Error("port "+p+" still in use")));s.listen(p,"127.0.0.1",()=>s.close(ok))});console.log("ports 3002 and 8889 released")})().catch(e=>{console.error(e.message);process.exit(1)})'
+          if pgrep -af 'node index.js'; then echo "server or collector still running"; exit 1; fi
+          curl -fsS -o /dev/null http://127.0.0.1:41434/api/tags && echo "mock engines still running (the launcher stops only its own services)"
+          find "$HOME" -mindepth 1 -maxdepth 2 | sort > "$RUNNER_TEMP/home-after.txt"
+          echo "new paths in \$HOME (depth 2) during the session:"
+          comm -13 "$RUNNER_TEMP/home-before.txt" "$RUNNER_TEMP/home-after.txt" | tee "$EVIDENCE/09-home-changes.txt"
+          echo "files the launcher created inside the checkout:"
+          git status --porcelain --ignored | grep -E 'server/(\.env|storage|public)|collector/\.env' | head -20 | tee "$EVIDENCE/10-checkout-files.txt"
+      - name: Launcher and server logs (on failure)
+        if: failure()
+        run: |
+          tail -n 80 "$RUNNER_TEMP/launcher.log" || true
+          tail -n 120 server/storage/fork-logs/server.log || true
+          tail -n 40 server/storage/fork-logs/collector.log || true
+      - name: Upload rehearsal evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: owner-procedure-rehearsal-evidence
+          path: ${{ runner.temp }}/owner-procedure-evidence
+          retention-days: 7
+          if-no-files-found: warn
