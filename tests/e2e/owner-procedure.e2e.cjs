@@ -67,9 +67,9 @@ async function newContext(browser) {
   return browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: "dark", acceptDownloads: true });
 }
 
-async function signIn(browser, u, who) {
-  const context = await newContext(browser);
-  const page = track(await context.newPage(), who);
+async function signIn(browser, u, who, existing = null) {
+  const context = existing ? null : await newContext(browser);
+  const page = existing || track(await context.newPage(), who);
   await page.goto(`${BASE}/login`);
   await page.locator('input[name="username"]').first().fill(u.username);
   await page.locator('input[name="password"]').first().fill(u.password);
@@ -127,36 +127,33 @@ async function main() {
   fs.mkdirSync(SHOTS, { recursive: true });
   const browser = await chromium.launch({ executablePath: process.env.CHROME || "/usr/bin/google-chrome" });
   try {
-    // ------------------------------------------------ §6 step 1: onboarding
+    // ------------------------------------------------ §6 step 1: first start
+    // tools/linux-run.sh writes LLM settings into server/.env, so the server
+    // treats the instance as already onboarded and opens in single-user mode
+    // with no password. Multi-user mode is switched on in Settings → Security.
     const adminCtx = await newContext(browser);
     const admin = track(await adminCtx.newPage(), "admin");
     await admin.goto(BASE);
-    await admin.getByRole("button", { name: "Get Started" }).click();
-    await admin.getByPlaceholder("Search LLM providers").waitFor();
-    const basePath = admin.locator('input[name="OllamaLLMBasePath"]');
-    if (!(await basePath.count())) {
-      await admin.getByPlaceholder("Search LLM providers").fill("Ollama");
-      await admin.getByText("Ollama", { exact: true }).first().click();
-    }
-    await admin.getByRole("button", { name: /Show advanced settings/ }).click();
-    await basePath.fill("http://127.0.0.1:41434");
-    await basePath.blur();
-    const modelPref = admin.locator('select[name="OllamaLLMModelPref"]');
-    await modelPref.locator('option[value="qwen3:8b"]').waitFor({ state: "attached", timeout: 20000 });
-    await modelPref.selectOption("qwen3:8b");
-    await shot(admin, "01-onboarding-llm-ollama-via-tunnel-port");
-    await admin.getByRole("button", { name: "Continue" }).first().click();
-    await admin.getByText("My team", { exact: true }).click();
-    await admin.locator('input[name="username"]').last().fill(USERS.admin.username);
-    await admin.locator('input[name="password"]').last().fill(USERS.admin.password);
-    await admin.waitForTimeout(800); // the form debounces input
-    await admin.getByRole("button", { name: "Continue" }).first().click();
-    await admin.waitForURL(/data-handling/, { timeout: 20000 });
-    await admin.getByRole("button", { name: "Continue" }).first().click();
-    await admin.getByRole("button", { name: "Skip Survey" }).click();
-    await admin.waitForURL((u) => !u.pathname.startsWith("/onboarding"), { timeout: 20000 });
+    await admin.waitForLoadState("networkidle");
+    assert.equal(new URL(admin.url()).pathname.startsWith("/onboarding"), false, "unexpected onboarding");
+    assert.equal(new URL(admin.url()).pathname.startsWith("/login"), false, "unexpected login page");
+    await shot(admin, "01-first-start-single-user-no-password");
+    ok("§6.1: the launcher's instance opens without onboarding, in single-user mode with no password");
+
+    await admin.goto(`${BASE}/settings/security`);
+    await admin.getByText("Enable Multi-User Mode", { exact: true }).click();
+    await admin.locator('input[name="username"]').fill(USERS.admin.username);
+    await admin.locator('input[name="password"]').fill(USERS.admin.password);
+    await admin.getByRole("button", { name: "Save changes" }).click();
+    await admin.getByText("Multi-User mode enabled successfully.").first().waitFor();
+    await admin.waitForURL((u) => /\/(login|settings\/users)/.test(u.pathname), { timeout: 20000 });
+    await signIn(browser, USERS.admin, "admin", admin);
     await admin.waitForFunction(() => !!localStorage.getItem("anythingllm_authToken"));
-    ok("§6.1: onboarding with Ollama at the tunnel port (41434) and 'My team' admin works as written");
+    assert.equal(await apiStatus(admin, "/api/nytedesk/status"), 200);
+    const status = await apiJson(admin, "/api/nytedesk/status");
+    assert.equal(status.enabled, true, "NYTEDESK_ENABLED from the shell reached the server");
+    assert.equal(status.multiUser, true);
+    ok("§6.1: Settings → Security → Enable Multi-User Mode creates the admin; NyteDesk reports enabled + multi-user");
 
     // ------------------------------------------------ §6 step 2: users
     await admin.goto(`${BASE}/settings/users`);
