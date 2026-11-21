@@ -145,8 +145,8 @@ async function runModelOperation({ endpoint, model, operation }, options = {}) {
     payload,
     timeoutMs:
       operation === "load"
-        ? (options.loadTimeoutMs ?? LOAD_TIMEOUT_MS)
-        : (options.unloadTimeoutMs ?? UNLOAD_TIMEOUT_MS),
+        ? options.loadTimeoutMs ?? LOAD_TIMEOUT_MS
+        : options.unloadTimeoutMs ?? UNLOAD_TIMEOUT_MS,
   });
   const durationMs = Date.now() - started;
   const after = await loadedModels(base, options);
