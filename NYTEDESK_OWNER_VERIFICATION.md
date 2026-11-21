@@ -6,7 +6,7 @@ This is a controlled verification of the dashboard, engines, permissions, approv
 
 | Item | Value (checked against GitHub when this guide was written) |
 |---|---|
-| PR #7 | Draft, unmerged; head `a76f7bfe4b79ead1db3491d70db58a32a18627f4` |
+| PR #7 | Draft, unmerged; head: see the PR body (documentation-only commits after the accepted code) |
 | Accepted code | `1d2706897de03966dc52519363036330d86507bc`. The head differs only in `NYTEDESK_DASHBOARD_HANDOFF.md` (plus this guide once committed). |
 | PR #6 (base) | Draft, unmerged; head `70742d59e17fc07b34adfb3914ce14725fba546f` |
 | Independent QA | Approved for owner verification (relayed by the owner). Two non-blocking nits: live-region verbosity, and extra test coverage. |
@@ -44,7 +44,6 @@ Run these in a VM terminal. If your shell is fish, type `bash` first.
 mkdir -p ~/nytedesk-verify && cd ~/nytedesk-verify
 git clone --branch feature/nytedesk-dashboard-ui https://github.com/nyteghost/anything-llm.git
 cd anything-llm
-git checkout --detach a76f7bfe4b79ead1db3491d70db58a32a18627f4
 git rev-parse HEAD
 git diff --stat 1d2706897de03966dc52519363036330d86507bc HEAD
 test ! -e server/.env && echo "OK: no server/.env yet"
@@ -52,12 +51,12 @@ tools/linux-run.sh --check
 ```
 
 Expected:
-- `git rev-parse HEAD` prints `a76f7bfe4b79ead1db3491d70db58a32a18627f4` (or the newer docs-only head named in the PR body).
-- The diff lists only `.md` files.
+- `git rev-parse HEAD` prints the PR #7 head shown in the PR body. Record it.
+- The diff lists only `.md` files, which proves the code is the QA-accepted `1d27068`.
 - You see `OK: no server/.env yet`.
 - `--check` prints the paths of `node`, `npm` and `flock`, a Node version, and "This launcher uses Node 24, Yarn Classic, ports 3002/8889, and this checkout's server/storage."
 
-**Stop if** the SHA differs, the diff lists non-`.md` files, or `flock` is missing.
+**Stop if** the SHA differs from the PR body, the diff lists non-`.md` files, or `flock` is missing.
 
 Everything this instance creates stays inside `~/nytedesk-verify/anything-llm`:
 - `server/storage` (databases and logs, including `nytedesk/nytedesk.db`);
@@ -145,6 +144,8 @@ tools/linux-run.sh
 - **First run:** it installs dependencies for server, collector and frontend, runs `prisma generate` and `migrate deploy`, builds the frontend and stages it. This takes several minutes.
 - **Expected end:** "Your fork is ready: http://127.0.0.1:3002" and "Keep this terminal open. Press Ctrl+C to stop both services."
 - **Logs:** `server/storage/fork-logs/server.log` and `collector.log`.
+- **Network:** on start, AnythingLLM fetches public model metadata (context-window and pricing maps) from the internet into `server/storage/models/`. This is unrelated to your engines.
+- **Expected harmless log lines:** "[Ollama] Error caching context windows: fetch failed". AnythingLLM's own chat points at `127.0.0.1:11434`, where nothing listens in the VM, by design (see §4.2).
 - **Failure cases:** "Port 3002/8889 is already in use" (another instance is running, so nothing was changed), "This checkout is already running or building", or "Startup did not complete" (the last log lines are printed).
 
 `NYTEDESK_ENABLED=true` is read from your shell. The launcher's generated `server/.env` doesn't set it, and existing shell variables take precedence over that file.
@@ -155,13 +156,17 @@ tools/linux-run.sh
 
 ## 6. Stage 5: first-time setup in the browser
 
-1. **Onboarding:**
-   - **LLM preference:** keep Ollama. If the step needs a reachable server to continue, enter `http://127.0.0.1:41434` and pick any listed model. This only lists models; nothing loads until a chat message is sent.
-   - **User setup:** choose **My team** and create the **admin** account.
-   - Skip or answer the survey, then finish.
-2. As admin, open **Settings → Users** (`/settings/users`) and create a **manager** user and a **default** user.
-3. Create a workspace named `NyteDesk Verify`. Under the workspace's settings, add the default user to it in **Members**.
-4. Open **`/nytedesk`**.
+The launcher writes LLM settings into `server/.env`, so AnythingLLM treats the instance as already set up. **There is no onboarding wizard:** the instance opens in **single-user mode with no password**. It listens only on the VM's `127.0.0.1`, but enable multi-user mode first. NyteDesk requires it, and until it is on, anyone who can reach that port has full access. (Rehearsed in CI: see §11.)
+
+1. **Enable multi-user mode:** open `http://127.0.0.1:3002/settings/security`. Click **Enable Multi-User Mode**, enter the **admin** username and password, and click **Save changes**.
+   - "Multi-User mode enabled successfully." appears, and after about 2 s you are sent to sign in.
+   - The browser console may show "Cannot read properties of undefined (reading 'preventDefault')". That comes from upstream AnythingLLM's Security page; the change still saves.
+2. **Sign in as admin.** On the first sign-in AnythingLLM shows recovery codes: click **Download**, then **Close**. Keep the file private, or delete it after the session.
+3. As admin, open **Settings → Users** (`/settings/users`), choose **Add user**, and create a **manager** and a **default** user.
+4. Create a workspace named `NyteDesk Verify` with the new-workspace button in the sidebar. Then open its settings → **Members** → **Manage Users**, tick the default user, and click **Save**.
+5. Open **`/nytedesk`**.
+
+You don't need to change AnythingLLM's own LLM setting. It stays on Ollama at `127.0.0.1:11434`, where nothing listens in the VM, so chat and uploads won't work in this instance. That is deliberate: it keeps them off your GPU (see §6.3).
 
 ### 6.1 Engine configuration in Local AI Manager (admin, read-only toward the engines)
 
@@ -202,7 +207,7 @@ Mark each item ✅, ❌ (with a note) or n/a.
 - [ ] The account button (initials) sits in the top bar and doesn't cover the text-size or refresh controls.
 - [ ] Text size: 10–22 px, live update, Normal (14 px) reset, keyboard operable, Escape closes it, and it persists after a reload. Headings and code in chat scale with it.
 - [ ] Freshness shows "Updated …" (or a short label on narrow screens), with Refreshing, Stale and Failed states and a manual refresh.
-- [ ] Light and dark themes (Settings → Interface) both look correct.
+- [ ] Light and dark themes (Settings → UI Preferences) both look correct.
 - [ ] Keyboard only: you can reach every navigation item, the command bar (Ctrl+K), the divider and the text-size control.
 - [ ] Phone width drawer: it opens; Tab and Shift+Tab stay inside; Escape or tapping outside closes it; focus returns to the menu button. Widening the window while it's open closes it and moves focus to the desktop navigation.
 
@@ -292,9 +297,34 @@ tools/linux-run.sh --check-toolchain >> ../evidence/01-environment.txt 2>&1
    ```bash
    rm -rf ~/nytedesk-verify/anything-llm
    ```
-   No global packages, services or configuration were changed, so there is nothing else to undo.
+   No global packages, services or system configuration were changed. Outside the folder, only package caches in your home directory were created or updated: `~/.npm`, `~/.cache/yarn`, `~/.cache/prisma` and `~/.cache/prisma-nodejs` (observed in the CI rehearsal). They are safe to keep; to remove them as well:
+   ```bash
+   rm -rf ~/.cache/prisma ~/.cache/prisma-nodejs   # only if no other project uses Prisma
+   yarn cache clean 2>/dev/null; npm cache clean --force
+   ```
 
 ## 10. What happens next
 
 - Record results with the template. Any ❌ becomes a defect for the developer and is re-reviewed independently.
 - Only after owner verification passes are PR #6 and PR #7 evaluated together for integration readiness. That is a separate decision; neither is merged by this procedure.
+
+## 11. CI rehearsal of this guide (CI-simulated, not owner verification)
+
+Draft PR #8 (do not merge) runs this guide in GitHub Actions:
+- §2 and §3 verbatim, including the docs-only diff check, `--check`, `--check-toolchain` and the fork tests;
+- mock engines on the tunnel ports 41434, 41537 and 41600, and the §4.3 checks verbatim;
+- `tools/linux-run.sh` with `NYTEDESK_ENABLED=true`;
+- §6–§7 in Chrome;
+- the §7.4 process check, §8 evidence, and §9 shutdown by SIGINT.
+
+**Result:** every rehearsal step passed (run `44854354596`, evidence artifact `14687315570`).
+- **Launch:** listeners are only `127.0.0.1:3002` and `127.0.0.1:8889`. NyteDesk reports enabled and multi-user after Settings → Security.
+- **Browser procedure:** all 19 checks pass. Users, members, engine configure/check/select, non-loopback refusal, wrong-port diagnostics, the authorization matrix (including 401/403), self-approval, the protected-action rule, the two-browser approval race, execution disabled, Unavailable GPU metrics, focus refresh and tunnel drop/restore.
+- **Engines and processes:** engine traffic was 8 requests, all `GET` model listings, with no model loads. There were no `nvidia-smi` or shell children of the server.
+- **Shutdown:** SIGINT stopped the server and collector and released both ports; the mock engines kept running.
+
+It does **not** cover your real engines, your hardware, the SSH tunnels themselves, or how the dashboard looks to you. Those remain for this guide.
+
+**Known issues at the accepted code**, found by the rehearsal. Fixes are proposed in PR #8 and need independent re-review before they can enter PR #7:
+- **K1:** typing in the embedded chat and then resizing the window across 1024 px clears the typed text. The chat remounts, and its auto-focus can also take focus after the mobile drawer closes.
+- **K2:** "Submit for approval" (Tasks → Propose a task) logs "Cannot read properties of undefined (reading 'preventDefault')" in the console. The task is still created.
