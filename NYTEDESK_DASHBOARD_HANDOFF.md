@@ -2,7 +2,7 @@
 
 - **Branch:** `feature/nytedesk-dashboard-ui`
 - **Draft PR:** #7, base `feature/nytedesk-stabilization-local-ai` (PR #6)
-- **Code verified at:** `dfe63bc4b270a99816bece5b8692ba9e743dae0a`, after the independent-review corrections (§9). The first round was verified at `0a6a2be`. The commit that updates this document changes only documentation. The PR body gives the final head.
+- **Code verified at:** `1d2706897de03966dc52519363036330d86507bc`, after the re-review corrections (§10). Earlier rounds were verified at `dfe63bc` (§9) and `0a6a2be`. The commit that updates this document changes only documentation. The PR body gives the final head.
 - **Design reference:** the owner-approved Gemini dashboard concept.
 - **Author:** Claude. **Requested reviewer:** Codex CLI or the owner. The author has not approved his own work.
 
@@ -169,4 +169,32 @@ Verdict received: changes requested; 5 should-fix and 1 nit; no authorization or
 
 - Claude could not open the new screenshot artifact: this sandbox's network blocks GitHub's artifact storage, and screenshots are no longer printed into logs, by design. The corrected behaviour is verified by e2e assertions, not by Claude viewing images.
 - `tabindex` and `inert` handling assumes a browser with `inert` support (Chrome 102+, Safari 15.5+, Firefox 112+).
+- Still not done: the owner's hardware or engines, a screen reader, an axe or contrast scan, Safari and Firefox.
+
+## 10. Re-review corrections N1–N3 (re-review of `dfe63bc`)
+
+The re-review decision was **changes requested**. F1, F4, F5 and the CSS item were resolved; F2 and F3 needed edge-case fixes. No authorization or execution issue was found. All three are addressed in `1d27068`.
+
+| Finding | Correction | Tests |
+|---|---|---|
+| **N1** Freshness hidden below `lg` | The indicator is always visible: a coloured dot (fresh green, refreshing blue, loading grey, stale amber, failed red) with a short label below `lg` ("10s ago", "Refreshing", "Stale 3m ago", "Failed") and the full sentence from `lg`. A polite `sr-only` live region announces the full sentence ("Dashboard data: …"). Manual refresh is kept. The top bar gap is tightened and the title truncates, so nothing overlaps. Times come only from `lastSuccessAt`. | Unit: short labels for every state; stale and failed always differ. Source: no `hidden lg:inline`, both labels, dot map. **e2e:** at 390, 768, 1024 and 1440, the indicator, refresh button, text-size control and account button are visible and have no overlapping bounding boxes, and the full label shows only from 1024. On a phone, Failed (red) and Stale (amber) are both shown and differ in text and dot class. |
+| **N2** Focus lost on mobile → desktop | Reaching the desktop breakpoint closes the drawer, and cleanup clears `inert` and `aria-hidden`. On the next animation frame, only if focus would otherwise be lost, focus goes to the opener if it is still visible, else to the desktop nav's `aria-current="page"` link, else to the nav's first focusable control (`restoreFocus`). The opener reference is cleared, so no detached node is kept. The desktop nav is never in the inert set. | Source checks. **e2e:** open the drawer at 390 with the keyboard, Tab inside, resize to 1440: the drawer closes, nothing is inert or aria-hidden, focus is on the visible "Dashboard" link (`aria-current="page"`) in the desktop nav, and Tab keeps focus. Resize back to 390: the drawer reopens, Shift+Tab stays inside, Escape returns focus to "Open navigation", and a backdrop click closes it. The existing F3 test still passes. |
+| **N3** In-flight requests after unmount | Data and telemetry requests each take a token from a per-mount sequencer and are checked after every `await`, before any state update; only the newest token applies. Unmount cancels both sequencers and drops the shared in-flight refresh. The lifecycle effect runs before the fetching effects and is StrictMode-safe (fresh sequencers on every mount). Single-flight, the 30 s interval, the 5 s focus throttle, last-good data, the manager/admin telemetry gate and the hidden-tab rules are unchanged. | Unit: `cancel()` voids current and future tokens; a late response after unmount applies nothing. Source: two guards in `load`, one in telemetry, cancel on unmount, unchanged constants. **e2e:** a manual refresh plus 5 focus events during a 2 s request make exactly 1 request. Unmounting during a delayed refresh gives 0 data and 0 telemetry requests over 11 s, no page errors, the body class removed, and a clean remount. A hidden tab with 2-minute-old data shows Stale with 0 data and 0 telemetry requests over 31 s, then refreshes when visible again. |
+
+### Verification at `1d27068` (CI)
+
+| Check | Run | Result |
+|---|---|---|
+| Lint, server and frontend | 44848801073 | ✅ |
+| Backend Jest | 44848801036 | ✅ 2570 passed, 5 skipped, 0 failed |
+| Fork tests (`focused-tests`) | 44848801065 | ✅ 135/135 |
+| Production `vite build` | 44848801065 | ✅ 6222 modules |
+| Browser harness (pinned driver) | 44848801065 | ✅ 5/5 |
+| **Real app in Chrome** (`dashboard-e2e`) | 44848801065 | ✅ 32/32, no base64 in the log |
+
+Screenshots artifact `14684752143` (expires 2026-11-28) holds seeded data only. It includes desktop, the 1024×768 and 768×1024 tablets, the 390×844 phone, the mobile drawer, and the new `18-mobile-freshness-failed` and `19-mobile-freshness-stale`.
+
+### Limits
+- The e2e simulates a hidden tab and aged data by overriding `document.hidden` and `Date.now` in the page; it does not actually background a browser tab.
+- Claude could not open the screenshot artifact from his sandbox; the behaviour is evidenced by the assertions.
 - Still not done: the owner's hardware or engines, a screen reader, an axe or contrast scan, Safari and Firefox.
