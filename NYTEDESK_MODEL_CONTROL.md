@@ -81,3 +81,27 @@ With it off, everything behaves exactly as in the PR #7 owner verification:
 - The single-operation lock is per server process, not across several servers sharing one database.
 - No UI e2e for the new controls yet. The API, store and state machine paths are covered over real HTTP.
 - A large model can take longer than the 180 s load timeout. That records `TIMEOUT` and fails the task, even if Ollama finishes loading later. The next load task would then be refused as "already loaded".
+
+## CI evidence at `078ba30`
+| Check | Run | Result |
+|---|---|---|
+| Lint, server and frontend | 44874592021 | ✅ (the first run at `caff5ec` found 2 prettier nits, fixed in `078ba30`) |
+| Backend Jest | 44874592033 | ✅ 2570 passed, 5 skipped |
+| Fork tests (`focused-tests`) | 44874592113 | ✅ 149/149, 0 skipped |
+| Production `vite build` | 44874592113 | ✅ |
+| Browser harness | 44874592113 | ✅ |
+| Real app in Chrome (`dashboard-e2e`) | 44874592113 | ✅ 32/32 on attempt 3; attempts 1 and 2 failed in the N2 resize step (known **K1** flake) |
+
+**K1 evidence:** rerunning the PR #7 base's own e2e (run 44848801065 at `1d27068`) on 2026-11-21 failed with the identical assertion: focus on the chat `TEXTAREA` after 29 checks. So the flake predates this branch. PR #8 contains the K1 fix (stable `ResizableSplit` structure) and still needs independent re-review.
+
+## Owner verification (when the review is done)
+These steps use the same VM procedure as `NYTEDESK_OWNER_VERIFICATION.md` (tunnels, launcher, users).
+1. Launch **without** `NYTEDESK_MODEL_CONTROL`. Check:
+   - the propose form refuses a model task with "Model control is disabled";
+   - the inspector's Execution row says it is off.
+2. Stop the launcher. Start it again with `export NYTEDESK_MODEL_CONTROL=true`.
+3. Run an Ollama Check. Then, as `qa-default`, propose `engine.model.load` for a **small** model (for example `qwen2.5-coder:0.5b-base`).
+4. As `qa-manager`, approve it. As the admin, open the task: a "Load *model* now" button appears. `qa-default` (the requester) does not see it.
+5. Click it. On the desktop, `curl -s http://127.0.0.1:11434/api/ps` lists the model, and VRAM rises. The inspector shows Outcome "Confirmed (OK)" with the before/after lists. The audit shows `task.start` and then `task.succeed`.
+6. Propose, approve and run `engine.model.unload` for the same model. `/api/ps` is empty again, and VRAM returns to the baseline.
+7. Check that Strata and PolyStrata cannot be targeted, and that the engine process route still refuses everything.
