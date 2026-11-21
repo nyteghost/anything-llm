@@ -307,7 +307,10 @@ test("F4: the browser driver is pinned by lockfile and screenshots stay out of l
   assert.match(entry.resolved, /^https:\/\/registry\.npmjs\.org\//);
   const wf = read(".github/workflows/fork-focused-tests.yml");
   assert.doesNotMatch(wf, /playwright-core@/);
-  assert.equal((wf.match(/npm ci --prefix tests\/e2e --ignore-scripts/g) || []).length, 2);
+  // Every job that drives a browser installs the driver from the lockfile.
+  const drivers = (wf.match(/NODE_PATH[^\n]*tests\/e2e\/node_modules/g) || []).length;
+  assert.ok(drivers >= 2);
+  assert.equal((wf.match(/npm ci --prefix tests\/e2e --ignore-scripts/g) || []).length, drivers);
   assert.doesNotMatch(wf, /base64|NYTEDESK-SHOT/);
   assert.match(wf, /retention-days: 7/);
 });
