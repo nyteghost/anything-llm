@@ -248,7 +248,7 @@ test("F2: freshness distinguishes loading, refreshing, fresh, stale and failed",
   assert.equal(f({}).state, "loading");
   assert.equal(f({ lastError: "HTTP 500" }).state, "failed");
   assert.match(f({ lastError: "HTTP 500" }).label, /Could not load: HTTP 500/);
-  assert.deepEqual(f({ lastSuccessAt: "2026-11-20T12:04:50Z" }), { state: "fresh", label: "Updated 10s ago" });
+  assert.deepEqual(f({ lastSuccessAt: "2026-11-20T12:04:50Z" }), { state: "fresh", label: "Updated 10s ago", short: "10s ago" });
   assert.equal(f({ lastSuccessAt: "2026-11-20T12:04:50Z", refreshing: true }).state, "refreshing");
   assert.equal(f({ lastSuccessAt: "2026-11-20T12:02:00Z" }).state, "stale");
   const failed = f({ lastSuccessAt: "2026-11-20T12:04:00Z", lastError: "HTTP 502" });
@@ -268,7 +268,8 @@ test("F2: the data hook polls while visible, refreshes on focus, and cleans up",
   assert.match(hook, /clearInterval\(id\);\s*window\.removeEventListener\("focus", onFocus\)/);
   assert.match(hook, /tasks: t\.ok \? t\.data\.tasks \|\| \[\] : prev\.tasks/);   // keep last good data
   const shell = app("Shell.jsx");
-  assert.match(shell, /role="status"\s+aria-live="polite"\s+data-freshness=\{f\.state\}/);
+  assert.match(shell, /<span role="status" aria-live="polite" className="sr-only">/);
+  assert.match(shell, /data-freshness=\{f\.state\}/);
   assert.match(shell, /aria-label=\{`Refresh dashboard data\. \$\{f\.label\}`\}/);
 });
 
@@ -278,7 +279,7 @@ test("F3: the mobile drawer traps focus, makes the page inert and restores focus
   assert.match(shell, /el\.inert = true;\s*el\.setAttribute\("aria-hidden", "true"\)/);
   assert.match(shell, /el\.inert = false;\s*el\.removeAttribute\("aria-hidden"\)/);
   assert.match(shell, /document\.querySelector\("\[data-user-menu\]"\)/);   // account button too
-  assert.match(shell, /if \(opener && document\.contains\(opener\)\) opener\.focus\(\)/);
+  assert.match(shell, /restoreFocus\(opener, desktopNavRef\.current\)/);
   assert.match(shell, /if \(e\.key !== "Tab"\) return;/);
   assert.match(shell, /openerRef\.current = document\.activeElement/);
   assert.match(shell, /tabIndex=\{-1\}\s+aria-label="Close navigation"/);       // backdrop: mouse only
@@ -309,4 +310,92 @@ test("F4: the browser driver is pinned by lockfile and screenshots stay out of l
   assert.equal((wf.match(/npm ci --prefix tests\/e2e --ignore-scripts/g) || []).length, 2);
   assert.doesNotMatch(wf, /base64|NYTEDESK-SHOT/);
   assert.match(wf, /retention-days: 7/);
+});
+
+// ------------------------------------------------------------------ N1: freshness on every viewport
+test("N1: every freshness state has a short label for small screens", () => {
+  const now = Date.parse("2026-11-20T12:05:00Z");
+  const f = (o) => layout.dataFreshness(o, now);
+  assert.equal(f({}).short, "Loading");
+  assert.equal(f({ lastError: "x" }).short, "Failed");
+  assert.equal(f({ lastSuccessAt: "2026-11-20T12:04:50Z", refreshing: true }).short, "Refreshing");
+  assert.equal(f({ lastSuccessAt: "2026-11-20T12:04:00Z", lastError: "x" }).short, "Failed");
+  assert.equal(f({ lastSuccessAt: "2026-11-20T12:02:00Z" }).short, "Stale 3m ago");
+  assert.equal(f({ lastSuccessAt: "2026-11-20T12:04:50Z" }).short, "10s ago");
+  // Stale and failed never share a short label.
+  assert.notEqual(f({ lastSuccessAt: "2026-11-20T12:02:00Z" }).short, f({ lastSuccessAt: "2026-11-20T12:02:00Z", lastError: "x" }).short);
+});
+
+test("N1: the indicator is visible at every width; full sentence for screen readers", () => {
+  const shell = app("Shell.jsx");
+  const block = shell.split("function DataFreshness")[1].split("function TopBar")[0];
+  assert.doesNotMatch(block, /hidden lg:inline text-xs/);                     // no longer hidden below lg
+  assert.match(block, /className="lg:hidden" data-freshness-short/);
+  assert.match(block, /className="hidden lg:inline" data-freshness-full/);
+  assert.match(block, /FRESHNESS_DOT\[f\.state\]/);                           // colour plus text
+  assert.match(block, /`Dashboard data: \$\{f\.label\}`/);
+  for (const state of ["fresh", "refreshing", "loading", "stale", "failed"]) {
+    assert.match(shell, new RegExp(`FRESHNESS_DOT = \\{[^}]*\\b${state}:`), state);
+  }
+});
+
+// ------------------------------------------------------------------ N2: breakpoint focus
+test("N2: closing on a breakpoint change restores focus to a visible desktop control", () => {
+  const shell = app("Shell.jsx");
+  assert.match(shell, /useEffect\(\(\) => \{\s*if \(isDesktop\) setDrawerOpen\(false\);\s*\}, \[isDesktop\]\)/);
+  assert.match(shell, /openerRef\.current = null;/);                          // no detached reference kept
+  assert.match(shell, /window\.requestAnimationFrame\(/);                     // after the DOM commit
+  assert.match(shell, /if \(active && active !== document\.body && document\.contains\(active\)\)/);
+  assert.match(shell, /export function restoreFocus\(opener, nav\)/);
+  assert.match(shell, /nav\?\.querySelector\('\[aria-current="page"\]'\)/);
+  assert.match(shell, /el\.isConnected &&\s*!el\.closest\("\[inert\]"\) &&\s*el\.getClientRects\(\)\.length > 0/);
+  assert.match(shell, /ref=\{desktopNavRef\}/);
+  // The desktop navigation is never part of the inert background.
+  const bg = shell.match(/const background = \[([\s\S]*?)\]\.filter\(Boolean\)/)[1];
+  assert.doesNotMatch(bg, /desktopNavRef/);
+});
+
+// ------------------------------------------------------------------ N3: request lifecycle
+test("N3: cancelling a sequencer voids every token, including the current one", () => {
+  const seq = ts.createSequencer();
+  const t1 = seq.begin();
+  assert.equal(seq.isCurrent(t1), true);
+  seq.cancel();
+  assert.equal(seq.isCurrent(t1), false);
+  assert.equal(seq.isCurrent(seq.begin()), false);
+});
+
+test("N3: a response that arrives after unmount changes nothing", async () => {
+  // Mirrors useNyteDesk: token taken at request time, checked before setState.
+  const seq = ts.createSequencer();
+  const applied = [];
+  const request = async (value, delayMs) => {
+    const token = seq.begin();
+    await new Promise((r) => setTimeout(r, delayMs));
+    if (seq.isCurrent(token)) applied.push(value);
+  };
+  const late = request("late", 30);
+  seq.cancel(); // unmount
+  await late;
+  assert.deepEqual(applied, []);
+});
+
+test("N3: every data and telemetry update is guarded; unmount cancels both", () => {
+  const hook = app("useNyteDesk.js");
+  // Lifecycle effect comes before the fetching effects and is StrictMode-safe.
+  const lifecycle = hook.indexOf("dataSeq.current = createSequencer();");
+  assert.ok(lifecycle > 0 && lifecycle < hook.indexOf("setInterval(tick, DATA_REFRESH_MS)"));
+  assert.match(hook, /dataSeq\.current\.cancel\(\);\s*telemetrySeq\.current\.cancel\(\);\s*singleFlight\.current = null;/);
+  // load(): checked after each await, before any state update.
+  const load = hook.split("const load = useCallback")[1].split("const refresh = useCallback")[0];
+  assert.equal((load.match(/if \(!seq\.isCurrent\(token\)\) return;/g) || []).length, 2);
+  assert.ok(load.indexOf("await NyteDesk.status()") < load.indexOf("if (!seq.isCurrent(token)) return;"));
+  const poll = hook.split("const pollTelemetry = useCallback")[1].split("const ready")[0];
+  assert.match(poll, /await NyteDesk\.telemetry\(\);\s*if \(!seq\.isCurrent\(token\)\) return;/);
+  assert.match(poll, /document\.hidden\) return;/);
+  // Single-flight, 30 s interval and 5 s focus throttle unchanged.
+  assert.match(hook, /createSingleFlight\(load\)/);
+  assert.match(hook, /Date\.now\(\) - lastAttempt\.current < FOCUS_REFRESH_MIN_MS/);
+  assert.equal(layout.DATA_REFRESH_MS, 30_000);
+  assert.equal(layout.FOCUS_REFRESH_MIN_MS, 5_000);
 });

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import NyteDesk from "@/models/nytedesk";
+import { createSequencer } from "@/utils/nytedesk/taskState";
 import {
   DATA_REFRESH_MS,
   FOCUS_REFRESH_MIN_MS,
@@ -20,6 +21,10 @@ const TELEMETRY_ROLES = ["admin", "manager"];
  * FOCUS_REFRESH_MIN_MS); runs never overlap. A failed refresh keeps the last
  * good data and reports the failure. Host telemetry is polled only for roles
  * the server allows (managers and administrators).
+ *
+ * Lifecycle: every data and telemetry request takes a token from its own
+ * sequencer, and only the newest token may update state. Unmounting cancels
+ * both sequencers, so a response that arrives later changes nothing.
  */
 export default function useNyteDesk(role) {
   const [state, setState] = useState({
@@ -41,11 +46,31 @@ export default function useNyteDesk(role) {
   const [telemetryError, setTelemetryError] = useState(null);
   const [now, setNow] = useState(() => Date.now());
   const lastAttempt = useRef(0);
+  const dataSeq = useRef(null);
+  const telemetrySeq = useRef(null);
+  const singleFlight = useRef(null);
+
+  // Lifecycle (declared first, so it runs before the effects that fetch):
+  // fresh sequencers on mount; on unmount they are cancelled and the shared
+  // in-flight refresh is dropped. Safe under StrictMode's mount/unmount/mount.
+  useEffect(() => {
+    dataSeq.current = createSequencer();
+    telemetrySeq.current = createSequencer();
+    return () => {
+      dataSeq.current.cancel();
+      telemetrySeq.current.cancel();
+      singleFlight.current = null;
+    };
+  }, []);
 
   const load = useCallback(async () => {
+    const seq = dataSeq.current;
+    if (!seq) return;
+    const token = seq.begin();
     lastAttempt.current = Date.now();
     setSync((prev) => ({ ...prev, refreshing: true }));
     const s = await NyteDesk.status();
+    if (!seq.isCurrent(token)) return;
     if (!s.ok || !s.data.enabled || !s.data.multiUser) {
       setState((prev) => ({
         ...prev,
@@ -67,6 +92,7 @@ export default function useNyteDesk(role) {
       NyteDesk.approvals(),
       NyteDesk.workspaces(),
     ]);
+    if (!seq.isCurrent(token)) return;
     const firstError = [a, e, t, p, w].find((r) => !r.ok)?.error ?? null;
     // Keep the last good value of anything that failed this time.
     setState((prev) => ({
@@ -86,7 +112,6 @@ export default function useNyteDesk(role) {
     }));
   }, []);
 
-  const singleFlight = useRef(null);
   const refresh = useCallback(() => {
     if (!singleFlight.current) singleFlight.current = createSingleFlight(load);
     return singleFlight.current();
@@ -114,7 +139,11 @@ export default function useNyteDesk(role) {
 
   const pollTelemetry = useCallback(async () => {
     if (typeof document !== "undefined" && document.hidden) return;
+    const seq = telemetrySeq.current;
+    if (!seq) return;
+    const token = seq.begin();
     const r = await NyteDesk.telemetry();
+    if (!seq.isCurrent(token)) return;
     if (r.ok) {
       setTelemetry(r.data.telemetry);
       setTelemetryError(null);

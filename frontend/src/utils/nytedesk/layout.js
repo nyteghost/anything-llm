@@ -96,22 +96,37 @@ export function dataFreshness(
   const t = Date.parse(lastSuccessAt);
   const has = Number.isFinite(t);
   const age = has ? freshness(lastSuccessAt, now, staleAfterMs) : null;
+  // `label` is the full sentence; `short` fits a phone's top bar.
   if (!has) {
-    if (lastError)
-      return { state: "failed", label: `Could not load: ${lastError}` };
-    return { state: "loading", label: "Loading…" };
+    if (lastError) {
+      return {
+        state: "failed",
+        label: `Could not load: ${lastError}`,
+        short: "Failed",
+      };
+    }
+    return { state: "loading", label: "Loading…", short: "Loading" };
   }
-  if (refreshing)
+  if (refreshing) {
     return {
       state: "refreshing",
       label: `Refreshing… (data from ${age.label})`,
+      short: "Refreshing",
     };
-  if (lastError)
+  }
+  if (lastError) {
     return {
       state: "failed",
       label: `Refresh failed; showing data from ${age.label}`,
+      short: "Failed",
     };
-  if (age.stale)
-    return { state: "stale", label: `Stale: updated ${age.label}` };
-  return { state: "fresh", label: `Updated ${age.label}` };
+  }
+  if (age.stale) {
+    return {
+      state: "stale",
+      label: `Stale: updated ${age.label}`,
+      short: `Stale ${age.label}`,
+    };
+  }
+  return { state: "fresh", label: `Updated ${age.label}`, short: age.label };
 }

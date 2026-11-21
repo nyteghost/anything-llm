@@ -206,13 +206,18 @@ export function reviewMatches(binding, task) {
  */
 export function createSequencer() {
   let latest = 0;
+  let cancelled = false;
   return {
     begin() {
       latest += 1;
       return latest;
     },
     isCurrent(token) {
-      return token === latest;
+      return !cancelled && token === latest;
+    },
+    /** Voids every token, current and future (e.g. on unmount). */
+    cancel() {
+      cancelled = true;
     },
   };
 }

@@ -64,6 +64,26 @@ export function focusableIn(root) {
   );
 }
 
+const isVisible = (el) =>
+  !!el &&
+  el.isConnected &&
+  !el.closest("[inert]") &&
+  el.getClientRects().length > 0;
+
+/**
+ * Focus `opener` if it is still on screen; otherwise the current page in
+ * `nav`, then the first focusable control in `nav`. Never a detached node.
+ */
+export function restoreFocus(opener, nav) {
+  if (isVisible(opener)) return opener.focus();
+  const candidates = [
+    nav?.querySelector('[aria-current="page"]'),
+    ...focusableIn(nav),
+  ];
+  const target = candidates.find(isVisible);
+  if (target) target.focus();
+}
+
 export function useMediaQuery(query) {
   const get = () =>
     typeof window !== "undefined" && window.matchMedia
@@ -109,6 +129,7 @@ export default function Shell({
   const contentRef = useRef(null);
   const drawerRef = useRef(null);
   const openerRef = useRef(null);
+  const desktopNavRef = useRef(null);
   const drawerModal = drawerOpen && !isDesktop;
 
   // Lets index.css place AnythingLLM's account button in this top bar.
@@ -164,7 +185,17 @@ export default function Shell({
         el.removeAttribute("aria-hidden");
       }
       const opener = openerRef.current;
-      if (opener && document.contains(opener)) opener.focus();
+      openerRef.current = null;
+      // After the commit that removed the drawer: return focus to the opener,
+      // or, when the opener is gone (the viewport became desktop), to the
+      // current page in the desktop navigation. Only if focus would be lost.
+      window.requestAnimationFrame(() => {
+        const active = document.activeElement;
+        if (active && active !== document.body && document.contains(active)) {
+          return;
+        }
+        restoreFocus(opener, desktopNavRef.current);
+      });
     };
   }, [drawerModal]);
 
@@ -194,6 +225,7 @@ export default function Shell({
     <div className="nytedesk-app w-screen h-screen overflow-hidden flex bg-zinc-950 light:bg-slate-50 text-white light:text-slate-900">
       {isDesktop && (
         <div
+          ref={desktopNavRef}
           className="shrink-0 h-full transition-[width] duration-150"
           style={{ width: collapsed ? NAV_COLLAPSED : NAV_EXPANDED }}
         >
@@ -420,23 +452,44 @@ const FRESHNESS_TONE = {
   failed: "text-red-300 light:text-red-700",
 };
 
-/** When the dashboard data last loaded, and a manual refresh. */
+const FRESHNESS_DOT = {
+  fresh: "bg-emerald-400",
+  refreshing: "bg-sky-400",
+  loading: "bg-zinc-400",
+  stale: "bg-amber-400",
+  failed: "bg-red-400",
+};
+
+/**
+ * When the dashboard data last loaded, and a manual refresh. Visible at every
+ * width: a dot plus a short label on phones and tablets, the full sentence
+ * from lg up. Screen readers get the full sentence from a polite live region.
+ */
 function DataFreshness({ sync, now, onRefresh }) {
   const f = dataFreshness(sync, now);
+  const when = sync?.lastSuccessAt
+    ? `Last successful refresh: ${sync.lastSuccessAt}`
+    : "No successful refresh yet";
   return (
-    <div className="flex items-center gap-1.5 shrink-0">
+    <div className="flex items-center gap-1 shrink-0 min-w-0">
+      <span role="status" aria-live="polite" className="sr-only">
+        {`Dashboard data: ${f.label}`}
+      </span>
       <span
-        role="status"
-        aria-live="polite"
+        aria-hidden="true"
         data-freshness={f.state}
-        className={`hidden lg:inline text-xs ${FRESHNESS_TONE[f.state]}`}
-        title={
-          sync?.lastSuccessAt
-            ? `Last successful refresh: ${sync.lastSuccessAt}`
-            : undefined
-        }
+        title={`${f.label}. ${when}`}
+        className={`flex items-center gap-1.5 text-xs whitespace-nowrap ${FRESHNESS_TONE[f.state]}`}
       >
-        {f.label}
+        <span
+          className={`w-2 h-2 rounded-full shrink-0 ${FRESHNESS_DOT[f.state]}`}
+        />
+        <span className="lg:hidden" data-freshness-short>
+          {f.short}
+        </span>
+        <span className="hidden lg:inline" data-freshness-full>
+          {f.label}
+        </span>
       </span>
       <button
         type="button"
@@ -466,7 +519,7 @@ function TopBar({
   onRefresh,
 }) {
   return (
-    <header className="shrink-0 flex items-center gap-3 pl-3 md:pl-6 pr-16 md:pr-20 h-14 border-b border-white/10 light:border-slate-200">
+    <header className="shrink-0 flex items-center gap-2 md:gap-3 pl-3 md:pl-6 pr-16 md:pr-20 h-14 border-b border-white/10 light:border-slate-200">
       {showMenuButton && (
         <button
           type="button"
@@ -477,7 +530,9 @@ function TopBar({
           <MenuIcon size={20} />
         </button>
       )}
-      <h1 className="text-base md:text-lg font-semibold truncate">{title}</h1>
+      <h1 className="min-w-0 text-base md:text-lg font-semibold truncate">
+        {title}
+      </h1>
       <div className="flex-1 flex justify-center min-w-0">
         <CommandBar workspaces={workspaces} />
       </div>

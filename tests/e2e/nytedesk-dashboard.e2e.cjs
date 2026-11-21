@@ -180,6 +180,31 @@ async function signIn(browser, u, options = {}) {
 const overlaps = (a, b) =>
   !!a && !!b && a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
 
+/** Counts requests whose URL matches `re` from now on. */
+function countRequests(page, re) {
+  const counter = { n: 0 };
+  page.on("request", (r) => {
+    if (re.test(r.url())) counter.n += 1;
+  });
+  return counter;
+}
+
+/** Freshness indicator plus top-bar controls: visible and not overlapping. */
+async function checkTopBar(page, label) {
+  const indicator = page.locator("[data-freshness]");
+  const box = await indicator.boundingBox();
+  assert.ok(box && box.width > 0 && box.height > 0, `${label}: freshness indicator visible`);
+  const refreshBtn = await page.getByRole("button", { name: /Refresh dashboard data/ }).boundingBox();
+  const textSize = await page.getByRole("banner").getByRole("button", { name: /text size/i }).boundingBox();
+  const account = await page.locator("[data-user-menu]").boundingBox();
+  const parts = { indicator: box, refresh: refreshBtn, textSize, account };
+  const names = Object.keys(parts);
+  for (let i = 0; i < names.length; i++)
+    for (let j = i + 1; j < names.length; j++)
+      assert.equal(overlaps(parts[names[i]], parts[names[j]]), false, `${label}: ${names[i]} overlaps ${names[j]}`);
+  return indicator;
+}
+
 async function shot(page, name) {
   await page.waitForTimeout(400);
   await page.screenshot({ path: path.join(SHOTS, `${name}.png`), fullPage: false });
@@ -263,6 +288,52 @@ async function main() {
     await page.getByRole("button", { name: /Refresh dashboard data/ }).click();
     await page.waitForFunction(() => document.querySelector("[data-freshness]")?.dataset.freshness === "fresh");
     ok("F2: a failed refresh is shown as failed, keeps the last good data, and recovers");
+
+    const desktopIndicator = await checkTopBar(page, "1440");
+    assert.equal(await desktopIndicator.locator("[data-freshness-full]").isVisible(), true);
+    assert.match(await desktopIndicator.locator("[data-freshness-full]").innerText(), /^Updated /);
+    ok("N1: at 1440px the full freshness sentence is visible and clear of the other controls");
+
+    // N3: overlapping refresh triggers while one request is in flight make one request.
+    const slowTasks = /\/api\/nytedesk\/tasks\?/;
+    await page.route(slowTasks, async (route) => {
+      await new Promise((r) => setTimeout(r, 2000));
+      await route.continue();
+    });
+    const taskRequests = countRequests(page, slowTasks);
+    await page.waitForTimeout(5200); // past the focus throttle
+    await page.getByRole("button", { name: /Refresh dashboard data/ }).click();
+    for (let i = 0; i < 5; i++) await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await page.waitForFunction(() => document.querySelector("[data-freshness]")?.dataset.freshness === "fresh", null, { timeout: 10000 });
+    assert.equal(taskRequests.n, 1, `overlapping refreshes made ${taskRequests.n} task requests`);
+    ok("N3: a manual refresh plus five focus events during one request make exactly one request");
+
+    // N3: unmount during a delayed refresh; nothing polls afterwards; remount is clean.
+    const telemetryRequests = countRequests(page, /\/api\/nytedesk\/telemetry/);
+    const errorsBefore = pageErrors.length;
+    await page.getByRole("button", { name: /Refresh dashboard data/ }).click();
+    await page.evaluate((target) => {
+      window.history.pushState({}, "", target);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    }, `/workspace/${s.slug}`);
+    await page.locator("textarea").first().waitFor({ timeout: 20000 });
+    assert.equal(await page.locator(".nytedesk-app").count(), 0, "dashboard unmounted");
+    assert.equal(await page.evaluate(() => document.body.classList.contains("nytedesk-route")), false);
+    const tasksAtUnmount = taskRequests.n;
+    telemetryRequests.n = 0;
+    await page.waitForTimeout(11000); // > telemetry interval; the delayed response lands meanwhile
+    assert.equal(telemetryRequests.n, 0, "telemetry kept polling after unmount");
+    assert.equal(taskRequests.n, tasksAtUnmount, "data kept polling after unmount");
+    assert.equal(pageErrors.length, errorsBefore, `page errors after unmount: ${pageErrors.slice(errorsBefore).join("; ")}`);
+    await page.unroute(slowTasks);
+    await page.evaluate(() => {
+      window.history.pushState({}, "", "/nytedesk");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await page.getByRole("heading", { name: "Main dashboard" }).waitFor();
+    await page.waitForFunction(() => document.querySelector("[data-freshness]")?.dataset.freshness === "fresh", null, { timeout: 10000 });
+    assert.match(await page.getByRole("region", { name: "Overview" }).innerText(), /Pending approvals\s*\d+/);
+    ok("N3: unmounting mid-refresh stops all polling, raises no errors, and remounting loads cleanly");
 
     await page.waitForTimeout(10500); // let a second telemetry sample arrive (CPU needs two)
     await shot(page, "01-dashboard-desktop-1440x900");
@@ -429,6 +500,12 @@ async function main() {
       await r.page.goto(`${BASE}/nytedesk`);
       await r.page.getByRole("heading", { name: "Main dashboard" }).waitFor();
       await r.page.waitForTimeout(1200);
+      const ind = await checkTopBar(r.page, name);
+      const shortVisible = await ind.locator("[data-freshness-short]").isVisible();
+      const fullVisible = await ind.locator("[data-freshness-full]").isVisible();
+      assert.equal(shortVisible || fullVisible, true, `${name}: freshness text visible`);
+      assert.equal(fullVisible, viewport.width >= 1024, `${name}: full label only from lg`);
+      ok(`N1: freshness visible and clear of other controls at ${viewport.width}x${viewport.height}`);
       await shot(r.page, name);
       await r.context.close();
     }
@@ -441,6 +518,49 @@ async function main() {
     const mAccount = await mobile.page.locator("[data-user-menu]").boundingBox();
     const mTextSize = await mobile.page.getByRole("banner").getByRole("button", { name: /text size/i }).boundingBox();
     assert.equal(overlaps(mAccount, mTextSize), false, "mobile: account button covers the text-size button");
+
+    // N1: compact freshness on a phone; failed and stale are visibly different.
+    const mInd = await checkTopBar(mobile.page, "390");
+    assert.equal(await mInd.locator("[data-freshness-short]").isVisible(), true);
+    const mTasks = /\/api\/nytedesk\/tasks\?/;
+    await mobile.page.route(mTasks, (route) =>
+      route.fulfill({ status: 500, contentType: "application/json", body: '{"error":"simulated outage"}' })
+    );
+    await mobile.page.getByRole("button", { name: /Refresh dashboard data/ }).click();
+    await mobile.page.waitForFunction(() => document.querySelector("[data-freshness]")?.dataset.freshness === "failed");
+    assert.equal(await mInd.locator("[data-freshness-short]").innerText(), "Failed");
+    const failedDot = await mInd.locator("span.rounded-full").getAttribute("class");
+    await shot(mobile.page, "18-mobile-freshness-failed");
+    await mobile.page.unroute(mTasks);
+    await mobile.page.getByRole("button", { name: /Refresh dashboard data/ }).click();
+    await mobile.page.waitForFunction(() => document.querySelector("[data-freshness]")?.dataset.freshness === "fresh");
+
+    // Hidden tab with aged data: no polling at all, and the data turns stale.
+    const hiddenTasks = countRequests(mobile.page, mTasks);
+    const hiddenTelemetry = countRequests(mobile.page, /\/api\/nytedesk\/telemetry/);
+    await mobile.page.evaluate(() => {
+      Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+      const realNow = Date.now.bind(Date);
+      window.__realNow = realNow;
+      Date.now = () => realNow() + 120000; // the last refresh is now 2 minutes old
+    });
+    await mobile.page.waitForFunction(() => document.querySelector("[data-freshness]")?.dataset.freshness === "stale", null, { timeout: 10000 });
+    assert.match(await mInd.locator("[data-freshness-short]").innerText(), /^Stale /);
+    const staleDot = await mInd.locator("span.rounded-full").getAttribute("class");
+    assert.notEqual(staleDot, failedDot, "stale and failed use different colours");
+    await shot(mobile.page, "19-mobile-freshness-stale");
+    await mobile.page.waitForTimeout(31000); // longer than the data (30 s) and telemetry (10 s) intervals
+    assert.equal(hiddenTasks.n, 0, `data polled ${hiddenTasks.n} times while hidden`);
+    assert.equal(hiddenTelemetry.n, 0, `telemetry polled ${hiddenTelemetry.n} times while hidden`);
+    await mobile.page.evaluate(() => {
+      delete document.hidden;
+      delete document.visibilityState;
+      Date.now = window.__realNow;
+    });
+    await mobile.page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    await mobile.page.waitForFunction(() => document.querySelector("[data-freshness]")?.dataset.freshness === "fresh", null, { timeout: 10000 });
+    ok("N1: on a phone, Failed and Stale are shown in text and colour; N3: no polling while hidden, refresh on return");
 
     // F3: keyboard-only use of the modal drawer.
     const opener = mobile.page.getByRole("button", { name: "Open navigation" });
@@ -466,6 +586,7 @@ async function main() {
     await shot(mobile.page, "17-mobile-navigation-drawer");
     await mobile.page.keyboard.press("Escape");
     assert.equal(await mobile.page.getByRole("dialog", { name: "Navigation" }).count(), 0);
+    await mobile.page.waitForTimeout(150); // focus returns on the next animation frame
     assert.equal(await mobile.page.evaluate(() => document.activeElement?.getAttribute("aria-label")), "Open navigation");
     assert.deepEqual(await inert(), { content: false, account: false });
     ok("F3: drawer traps Tab/Shift+Tab, makes the page inert, and Escape returns focus to the opener");
@@ -476,6 +597,62 @@ async function main() {
     assert.equal(await mobile.page.getByRole("dialog", { name: "Navigation" }).count(), 0);
     ok("mobile: no horizontal overflow; backdrop dismissal works; account button clear of controls");
     await mobile.context.close();
+
+    // N2: drawer open at 390px, then the window grows past 768px.
+    const rs = await signIn(browser, USERS.admin, { viewport: { width: 390, height: 844 } });
+    const p2 = rs.page;
+    await p2.goto(`${BASE}/nytedesk`);
+    await p2.getByRole("heading", { name: "Main dashboard" }).waitFor();
+    const menuButton = p2.getByRole("button", { name: "Open navigation" });
+    await menuButton.focus();
+    await p2.keyboard.press("Enter");
+    await p2.getByRole("dialog", { name: "Navigation" }).waitFor();
+    await p2.keyboard.press("Tab");
+    assert.equal(await p2.evaluate(() => !!document.activeElement?.closest('[role="dialog"]')), true);
+    await p2.setViewportSize({ width: 1440, height: 900 });
+    await p2.getByRole("button", { name: "Collapse navigation" }).waitFor();
+    assert.equal(await p2.getByRole("dialog", { name: "Navigation" }).count(), 0);
+    await p2.waitForTimeout(300);
+    const landed = await p2.evaluate(() => {
+      const el = document.activeElement;
+      return {
+        tag: el?.tagName,
+        inNav: !!el?.closest('nav[aria-label="NyteDesk"]'),
+        current: el?.getAttribute("aria-current"),
+        visible: !!el && el !== document.body && el.getClientRects().length > 0,
+        inert: !!el?.closest("[inert]"),
+        contentInert: !!document.getElementById("nytedesk-main")?.closest("[inert]"),
+        accountInert: !!document.querySelector("[data-user-menu]")?.inert,
+        ariaHidden: document.querySelectorAll('[aria-hidden="true"][inert]').length,
+      };
+    });
+    assert.deepEqual(
+      landed,
+      { tag: "A", inNav: true, current: "page", visible: true, inert: false, contentInert: false, accountInert: false, ariaHidden: 0 },
+      JSON.stringify(landed)
+    );
+    ok("N2: growing past 768px closes the drawer, clears inert, and focuses the current page in the desktop nav");
+    await p2.keyboard.press("Tab");
+    assert.equal(await p2.evaluate(() => document.activeElement !== document.body), true, "focus not lost after Tab");
+
+    await p2.setViewportSize({ width: 390, height: 844 });
+    await menuButton.waitFor();
+    await menuButton.focus();
+    await p2.keyboard.press("Enter");
+    await p2.getByRole("dialog", { name: "Navigation" }).waitFor();
+    for (let i = 0; i < 6; i++) {
+      await p2.keyboard.press("Shift+Tab");
+      assert.equal(await p2.evaluate(() => !!document.activeElement?.closest('[role="dialog"]')), true);
+    }
+    await p2.keyboard.press("Escape");
+    await p2.waitForTimeout(150);
+    assert.equal(await p2.evaluate(() => document.activeElement?.getAttribute("aria-label")), "Open navigation");
+    await menuButton.click();
+    await p2.getByRole("dialog", { name: "Navigation" }).waitFor();
+    await p2.mouse.click(370, 400);
+    assert.equal(await p2.getByRole("dialog", { name: "Navigation" }).count(), 0);
+    ok("N2: back at 390px the drawer reopens, traps focus, and Escape/backdrop still work");
+    await rs.context.close();
   } catch (e) {
     await diagnose();
     throw e;
