@@ -126,7 +126,34 @@ export const ACTION_INFO = Object.freeze({
     label: "Publish externally",
     scope: "External services",
   },
+  "engine.model.load": {
+    label: "Load a model",
+    scope: "Inference engine (load a model)",
+  },
+  "engine.model.unload": {
+    label: "Unload a model",
+    scope: "Inference engine (unload a model)",
+  },
 });
+
+/** Engine model control actions (load/unload in a running engine). */
+export const MODEL_CONTROL_ACTIONS = Object.freeze([
+  "engine.model.load",
+  "engine.model.unload",
+]);
+
+/** The recorded outcome evidence of a model control task, or null. */
+export function modelOutcome(audit = []) {
+  const last = [...audit]
+    .reverse()
+    .find((e) => e.event === "task.succeed" || e.event === "task.fail");
+  if (!last || !last.detail || !last.detail.operation) return null;
+  return {
+    ...last.detail,
+    succeeded: last.event === "task.succeed",
+    at: last.at,
+  };
+}
 
 /** Approval level, from the server's `protected` flag (never guessed). */
 export function riskLevel(isProtected) {

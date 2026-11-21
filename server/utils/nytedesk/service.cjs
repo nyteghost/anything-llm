@@ -16,12 +16,17 @@
  *   requester; protected actions (ADMIN_APPROVAL_ACTIONS) need an admin;
  * - cancel: the requester, or a manager/admin with workspace access;
  * - provider configuration: managers and admins read, only admins change.
+ * - run: only engine model control tasks (engine.model.load / unload), only
+ *   when NYTEDESK_MODEL_CONTROL=true, by a manager or admin who is not the
+ *   requester, after a fresh re-authorization and engine check.
  *
- * Nothing here executes a model, shell, browser, VM or network call.
+ * Nothing here executes a shell, browser, VM or agent. The one network side
+ * effect is runTask's single loopback call to a running engine.
  */
 const cp = require("./control-plane.cjs");
 const lam = require("./local-ai-manager.cjs");
 const { createTelemetry } = require("./telemetry.cjs");
+const mc = require("./model-control.cjs");
 const { NyteDeskError, sha256 } = require("./store.cjs");
 
 const DECIDER_ROLES = Object.freeze(["admin", "manager"]);
@@ -79,6 +84,8 @@ function selectionBlocker(engine, now) {
 const PROCESS_DENIED =
   "Process control is disabled: NyteDesk never starts, stops, restarts, unloads or kills inference engines. Running engines are externally owned.";
 const OPEN_STATES = ["waiting_approval", "approved", "running"];
+const MODEL_CONTROL_DISABLED =
+  "Model control is disabled. The owner enables it with NYTEDESK_MODEL_CONTROL=true.";
 
 function assertActor(actor) {
   if (
@@ -277,9 +284,30 @@ function validateEngine(id, body) {
 function createService(store, options = {}) {
   const env = options.env ?? process.env;
   const telemetry = options.telemetry ?? createTelemetry();
+  const modelOps = options.modelControl ?? mc;
+  const probe = options.probe ?? lam.probeEngine;
+  // One model operation at a time across this server.
+  let modelOperationRunning = false;
+
+  const modelControlEnabled = () => env.NYTEDESK_MODEL_CONTROL === "true";
+  const isEngineControl = (task) =>
+    cp.ENGINE_CONTROL_ACTIONS.includes(task.action);
 
   function publicTask(task) {
-    return { ...task, executionEnabled: false };
+    return {
+      ...task,
+      executionEnabled: isEngineControl(task) && modelControlEnabled(),
+    };
+  }
+
+  function canRun(actor, task) {
+    return (
+      modelControlEnabled() &&
+      isEngineControl(task) &&
+      task.status === cp.STATES.APPROVED &&
+      Number(actor.id) !== Number(task.requesterId) &&
+      DECIDER_ROLES.includes(actor.role)
+    );
   }
 
   function keyPresent(keyEnv) {
@@ -312,6 +340,7 @@ function createService(store, options = {}) {
         browserAutomation: false,
         vmOperations: false,
         engineProcessControl: false,
+        modelControl: modelControlEnabled(),
         agentsMayApprove: false,
         storage: "sqlite",
         executionPreconditions: cp.EXECUTION_PRECONDITIONS.map((id) => ({
@@ -380,6 +409,26 @@ function createService(store, options = {}) {
       }
       const { description, adapter, action } = body;
       const fields = { description, adapter, action };
+      if (body.target !== undefined && body.target !== null) {
+        fields.target = body.target;
+      }
+      if (cp.ENGINE_CONTROL_ACTIONS.includes(action)) {
+        if (!modelControlEnabled()) {
+          throw new NyteDeskError(403, MODEL_CONTROL_DISABLED);
+        }
+        const check = store.engineChecks()[adapter];
+        const listed =
+          check &&
+          check.status === lam.STATUSES.EXTERNAL &&
+          Array.isArray(check.models) &&
+          check.models.includes(fields.target);
+        if (!listed) {
+          throw new NyteDeskError(
+            400,
+            "The model must be listed by the engine's last successful check"
+          );
+        }
+      }
       const route = `POST /nytedesk/workspaces/${workspace.slug}/tasks`;
       const hash = requestHash("POST", route, fields);
       return store.idempotent(actor.id, idempotencyKey, hash, () => {
@@ -428,7 +477,128 @@ function createService(store, options = {}) {
         canCancel:
           OPEN_STATES.includes(task.status) &&
           (isRequester || DECIDER_ROLES.includes(actor.role)),
+        canRun: canRun(actor, task),
+        modelControl: modelControlEnabled(),
       };
+    },
+
+    /**
+     * Run an approved engine model control task: one load or unload request
+     * to the running engine. Every condition is re-checked here, immediately
+     * before acting; the outcome and its evidence go into the audit chain.
+     * Any other action is refused: agent execution stays disabled.
+     */
+    async runTask(actor, task, body) {
+      assertActor(actor);
+      if (!isEngineControl(task)) {
+        throw new NyteDeskError(
+          403,
+          "Only engine model load/unload tasks can run; agent execution is disabled"
+        );
+      }
+      if (!modelControlEnabled()) {
+        throw new NyteDeskError(403, MODEL_CONTROL_DISABLED);
+      }
+      if (Number(actor.id) === task.requesterId) {
+        throw new NyteDeskError(403, "Requester cannot run their own task");
+      }
+      if (!DECIDER_ROLES.includes(actor.role)) {
+        throw new NyteDeskError(
+          403,
+          "Only a manager or administrator may run tasks"
+        );
+      }
+      const { expectedVersion } = body || {};
+      if (!Number.isSafeInteger(expectedVersion)) {
+        throw new NyteDeskError(400, "expectedVersion is required");
+      }
+      if (expectedVersion !== task.version) {
+        throw new NyteDeskError(409, "Task changed; reload and retry");
+      }
+      const r = store.reauthorize(task.id);
+      if (!r.ok) {
+        const why = r.problems.join("; ");
+        throw new NyteDeskError(409, `Reauthorization failed: ${why}`);
+      }
+      if (modelOperationRunning) {
+        throw new NyteDeskError(409, "Another model operation is running");
+      }
+      modelOperationRunning = true;
+      try {
+        const engine = service
+          .engines(actor)
+          .engines.find((e) => e.id === task.adapter);
+        if (!engine || !engine.endpoint) {
+          throw new NyteDeskError(409, "The engine has no endpoint");
+        }
+        // Fresh read-only check: the engine answers and lists the model.
+        const check = await probe(
+          {
+            id: engine.id,
+            endpoint: engine.endpoint,
+            api: engine.api,
+            model: task.target,
+          },
+          options.probeOptions ?? {}
+        );
+        store.saveEngineCheck(engine.id, actor, check);
+        if (
+          check.status !== lam.STATUSES.EXTERNAL ||
+          check.modelListed !== true
+        ) {
+          throw new NyteDeskError(
+            409,
+            "Fresh engine check failed or the model is not listed"
+          );
+        }
+        const before = await modelOps.loadedModels(
+          engine.endpoint,
+          options.modelOptions
+        );
+        if (!before.ok) {
+          throw new NyteDeskError(
+            409,
+            "Could not read the engine's loaded models"
+          );
+        }
+        const operation =
+          task.action === cp.ACTIONS.ENGINE_MODEL_LOAD ? "load" : "unload";
+        const isLoaded = before.models.includes(task.target);
+        if (operation === "load" && isLoaded) {
+          throw new NyteDeskError(409, "The model is already loaded");
+        }
+        if (operation === "unload" && !isLoaded) {
+          throw new NyteDeskError(409, "The model is not loaded");
+        }
+        const running = store.startTask(task.id, actor, {
+          expectedVersion: task.version,
+          executionEnabled: true,
+        });
+        const result = await modelOps.runModelOperation(
+          { endpoint: engine.endpoint, model: task.target, operation },
+          options.modelOptions
+        );
+        const evidence = {
+          operation,
+          engine: engine.id,
+          endpoint: engine.endpoint,
+          model: task.target,
+          code: result.code,
+          message: mc.DIAGNOSTICS[result.code] ?? null,
+          httpStatus: result.httpStatus,
+          durationMs: result.durationMs,
+          loadedBefore: before.models,
+          loadedAfter: result.loadedAfter,
+        };
+        const done = store.finishTask(task.id, actor, {
+          expectedVersion: running.version,
+          outcome: result.ok ? "succeed" : "fail",
+          evidence,
+        });
+        return { task: publicTask(done), result: evidence };
+      } finally {
+        modelOperationRunning = false;
+      }
     },
 
     decide(actor, task, decision, body, idempotencyKey) {

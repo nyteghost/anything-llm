@@ -1,7 +1,9 @@
 /**
  * NyteDesk task and approval API, mounted on the AnythingLLM API router.
- * Disabled unless NYTEDESK_ENABLED=true. Requires multi-user mode. No route
- * executes anything. See NYTEDESK_CONTROL_PLANE.md.
+ * Disabled unless NYTEDESK_ENABLED=true. Requires multi-user mode. The only
+ * route with a side effect outside NyteDesk runs approved engine model
+ * load/unload tasks, and only with NYTEDESK_MODEL_CONTROL=true. See
+ * NYTEDESK_CONTROL_PLANE.md and NYTEDESK_MODEL_CONTROL.md.
  */
 const { validatedRequest } = require("../utils/middleware/validatedRequest");
 const { userFromSession } = require("../utils/http");

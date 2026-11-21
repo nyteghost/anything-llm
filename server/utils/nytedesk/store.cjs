@@ -22,8 +22,10 @@
  * - Audit: append-only (triggers reject UPDATE and DELETE), SHA-256
  *   hash-chained per task, continuity checked against the task version.
  *
- * Execution is not available: `startTask` refuses unless the caller passes
- * `executionEnabled: true`, which no HTTP route does.
+ * Execution: `startTask` refuses unless the caller passes
+ * `executionEnabled: true`. The only caller that does is the engine model
+ * control path (service.runTask), for engine.model.* tasks, when the owner has
+ * enabled it. Agent execution has no caller.
  */
 const crypto = require("node:crypto");
 const fs = require("node:fs");
@@ -165,9 +167,9 @@ CREATE TABLE IF NOT EXISTS providers (
 const SQL = Object.freeze({
   task: "SELECT * FROM tasks WHERE id = ?",
   insertTask: `INSERT INTO tasks (id, workspace_id, workspace_slug,
-    requester_id, adapter, action, description, payload_hash, status, version,
-    approval_json, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
+    requester_id, adapter, action, target, description, payload_hash, status,
+    version, approval_json, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
   casTask: `UPDATE tasks SET status = ?, version = ?, updated_at = ?
     WHERE id = ? AND version = ?`,
   casTaskApproval: `UPDATE tasks SET status = ?, version = ?, updated_at = ?,
@@ -211,6 +213,22 @@ const SQL = Object.freeze({
     version, updated_by, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
 });
 
+/**
+ * Additive migration: the `target` column (model name of a model control
+ * task) and its own immutability trigger. Databases created before the
+ * column existed keep their original payload trigger, so the new trigger
+ * covers `target` separately.
+ */
+function migrate(db) {
+  const columns = db.prepare("PRAGMA table_info(tasks)").all();
+  if (!columns.some((c) => c.name === "target")) {
+    db.exec("ALTER TABLE tasks ADD COLUMN target TEXT");
+  }
+  db.exec(`CREATE TRIGGER IF NOT EXISTS tasks_target_immutable
+    BEFORE UPDATE OF target ON tasks
+    BEGIN SELECT RAISE(ABORT, 'nytedesk: task payload is immutable'); END;`);
+}
+
 function defaultFile() {
   const root = process.env.STORAGE_DIR
     ? path.resolve(process.env.STORAGE_DIR)
@@ -227,6 +245,7 @@ function rowToTask(row) {
     requesterId: Number(row.requester_id),
     adapter: row.adapter,
     action: row.action,
+    target: row.target ?? null,
     description: row.description,
     payloadHash: row.payload_hash,
     status: row.status,
@@ -246,6 +265,7 @@ function toMachine(task) {
     description: task.description,
     adapter: task.adapter,
     action: task.action,
+    ...(task.target ? { target: task.target } : {}),
     status: task.status,
     approval: task.approval,
     payloadHash: task.payloadHash,
@@ -296,6 +316,7 @@ function openStore(options = {}) {
   const db = new DatabaseSync(file);
   db.exec("PRAGMA busy_timeout = 5000;");
   db.exec(SCHEMA);
+  migrate(db);
   const now = options.now ?? (() => new Date().toISOString());
   const uuid = options.uuid ?? crypto.randomUUID;
   const ttl = options.approvalTtlMs ?? DEFAULT_APPROVAL_TTL_MS;
@@ -431,7 +452,7 @@ function openStore(options = {}) {
     NyteDeskError,
 
     /** Inside a transaction: create a waiting task and its first audit event. */
-    insertTask({ workspace, actor, description, adapter, action }) {
+    insertTask({ workspace, actor, description, adapter, action, target }) {
       let machine;
       try {
         const fields = {
@@ -440,6 +461,7 @@ function openStore(options = {}) {
           description,
           adapter,
           action,
+          target: target ?? null,
         };
         machine = cp.createTask(fields, { now, uuid });
       } catch (error) {
@@ -452,6 +474,7 @@ function openStore(options = {}) {
         Number(actor.id),
         adapter,
         action,
+        machine.target ?? null,
         description,
         machine.payloadHash,
         machine.status,
@@ -460,6 +483,7 @@ function openStore(options = {}) {
         machine.updatedAt
       );
       const detail = { adapter, action, payloadHash: machine.payloadHash };
+      if (machine.target) detail.target = machine.target;
       const at = machine.createdAt;
       appendAudit(machine.id, 1, "task.created", actor, at, detail);
       return rowToTask(getTaskRow(machine.id));
@@ -591,6 +615,29 @@ function openStore(options = {}) {
         casUpdate(task, next);
         const at = next.updatedAt;
         appendAudit(task.id, task.version, "task.start", actor, at, {});
+        return rowToTask(getTaskRow(task.id));
+      });
+    },
+
+    /**
+     * Record the outcome of a running task, with its evidence, in the audit
+     * chain. `outcome` is "succeed" or "fail".
+     */
+    finishTask(id, actor, { expectedVersion, outcome, evidence = {} }) {
+      if (!["succeed", "fail"].includes(outcome)) {
+        throw new NyteDeskError(400, "Unknown outcome");
+      }
+      return tx(() => {
+        const task = requireTask(id);
+        const next = machineTransition(task, {
+          operation: outcome,
+          actorId: String(actor.id),
+          expectedSequence: expectedVersion,
+        });
+        casUpdate(task, next);
+        const at = next.updatedAt;
+        const event = `task.${outcome}`;
+        appendAudit(task.id, task.version, event, actor, at, evidence);
         return rowToTask(getTaskRow(task.id));
       });
     },
