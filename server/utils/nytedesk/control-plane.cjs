@@ -60,6 +60,78 @@ const AGENTS = Object.freeze([
 ]);
 const ALLOWED_ADAPTERS = Object.freeze(AGENTS.map((a) => a.id));
 
+/**
+ * What each part of the system is, for people reading the dashboard. Inference
+ * engines serve a model; they are not agents. The coordinator is the local
+ * model running on whichever engine is selected. AgentBridge enforces policy.
+ * Task adapters `ollama`, `strata` and `polystrata` mean "the coordinator,
+ * through that engine". This catalog grants nothing.
+ */
+const COMPONENTS = Object.freeze(
+  [
+    {
+      id: "coordinator",
+      kind: "agent",
+      name: "Local coordinator model",
+      role: "coordinator",
+      responsibility:
+        "Plans, delegates and summarizes. Recommends tasks only: cannot approve, grant permissions or execute.",
+      runsOn: "the selected local inference engine",
+    },
+    {
+      id: "polystrata",
+      kind: "engine",
+      name: "PolyStrata",
+      role: "inference-engine",
+      responsibility:
+        "Serves the local model over an OpenAI-compatible API. Externally owned.",
+      runsOn: "owner's machine",
+    },
+    {
+      id: "strata",
+      kind: "engine",
+      name: "Strata",
+      role: "inference-engine",
+      responsibility: "Serves a local model. Externally owned.",
+      runsOn: "owner's machine",
+    },
+    {
+      id: "ollama",
+      kind: "engine",
+      name: "Ollama",
+      role: "inference-engine",
+      responsibility: "Serves local models. Externally owned.",
+      runsOn: "owner's machine",
+    },
+    {
+      id: "claude-code",
+      kind: "agent",
+      name: "Claude Code CLI",
+      role: "implementer",
+      responsibility: "Implements approved changes.",
+      runsOn: "dedicated VM",
+    },
+    {
+      id: "codex",
+      kind: "agent",
+      name: "Codex CLI",
+      role: "reviewer",
+      responsibility:
+        "Coding and independent review of work it did not implement.",
+      runsOn: "dedicated VM",
+    },
+    {
+      id: "agentbridge",
+      kind: "orchestrator",
+      name: "AgentBridge",
+      role: "orchestration",
+      responsibility:
+        "Routes work between agents and enforces policy and approvals.",
+      runsOn: "NyteDesk server",
+    },
+  ].map((c) => ({ ...c, mayApprove: false, executionEnabled: false }))
+);
+
 // Protected actions: their approval needs an administrator, not only a
 // manager. They change state outside the conversation, execute, publish,
 // touch credentials or change privileges.
@@ -275,6 +347,7 @@ module.exports = {
   ACTIONS,
   AGENTS,
   ALLOWED_ADAPTERS,
+  COMPONENTS,
   ADMIN_APPROVAL_ACTIONS,
   EXECUTION_PRECONDITIONS,
   MAX_DESCRIPTION,

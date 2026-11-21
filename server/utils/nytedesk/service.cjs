@@ -21,6 +21,7 @@
  */
 const cp = require("./control-plane.cjs");
 const lam = require("./local-ai-manager.cjs");
+const { createTelemetry } = require("./telemetry.cjs");
 const { NyteDeskError, sha256 } = require("./store.cjs");
 
 const DECIDER_ROLES = Object.freeze(["admin", "manager"]);
@@ -275,6 +276,7 @@ function validateEngine(id, body) {
 
 function createService(store, options = {}) {
   const env = options.env ?? process.env;
+  const telemetry = options.telemetry ?? createTelemetry();
 
   function publicTask(task) {
     return { ...task, executionEnabled: false };
@@ -317,6 +319,38 @@ function createService(store, options = {}) {
           verified: false,
         })),
       };
+    },
+
+    components() {
+      return structuredClone(cp.COMPONENTS);
+    },
+
+    /**
+     * Read-only host counters plus the selected engine; see telemetry.cjs.
+     * Policy: host details (CPU count, memory) are for managers and
+     * administrators only. Enforced here, not only in the UI.
+     */
+    telemetry(actor) {
+      assertActor(actor);
+      if (!DECIDER_ROLES.includes(actor.role)) {
+        throw new NyteDeskError(
+          403,
+          "Host telemetry is limited to managers and administrators"
+        );
+      }
+      const selection = store.getMeta(SELECTION_KEY);
+      let engine = null;
+      if (selection) {
+        const cfg = store
+          .listEngines()
+          .find((e) => e.id === selection.engineId);
+        engine = {
+          engineId: selection.engineId,
+          model: selection.model ?? null,
+          contextWindow: cfg?.contextWindow ?? null,
+        };
+      }
+      return telemetry.sample({ engine });
     },
 
     agents() {

@@ -59,6 +59,7 @@ const NyteDesk = {
     const body = { expectedVersion: task.version, reason: reason || null };
     return request("POST", taskPath(task, "cancel"), { body, key });
   },
+  telemetry: () => request("GET", "/nytedesk/telemetry"),
   engines: () => request("GET", "/nytedesk/engines"),
   saveEngine: (id, body, key) => {
     const path = `/nytedesk/engines/${encodeURIComponent(id)}`;

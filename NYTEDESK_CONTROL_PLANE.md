@@ -109,6 +109,15 @@ Identity comes only from the authenticated AnythingLLM session. No request body 
 - **Keys are never stored.** A request containing `apiKey`, `key`, `token`, `secret`, `password` or similar is rejected. `keyEnv` names an environment variable, which must start with `NYTEDESK_`, that the server owner sets. The API reports only whether it is set.
 - **Anthropic and OpenAI:** the base URL is restricted to their official API origins. Configuring them requires `keyEnv`.
 
+### Host telemetry policy (dashboard)
+
+`GET /api/nytedesk/telemetry` returns CPU utilization, CPU count and memory of the host running the NyteDesk server, read from Node's `os` module. Nothing is executed.
+
+- **Who may read it:** managers and administrators only. The service enforces this and returns 403 with no telemetry for every other role. The dashboard does not request it for other roles; it shows "Restricted" instead.
+- **Always:** authenticated, behind `NYTEDESK_ENABLED` and multi-user mode, `Cache-Control: no-store`.
+- GPU, VRAM, temperature, tokens/s and context usage are reported as unavailable, never estimated.
+- **Owner decision (open):** confirm this default, or widen access explicitly.
+
 ### Local AI Manager (read-only, external ownership)
 
 Code: `server/utils/nytedesk/local-ai-manager.cjs`, engine methods in `service.cjs`, routes in `routes.cjs`, UI in `frontend/src/pages/NyteDesk/LocalAIEngines.jsx`. Tests: `tests/fork/nytedesk-engines.test.cjs`, `tests/fork/local-ai-manager.test.cjs`.

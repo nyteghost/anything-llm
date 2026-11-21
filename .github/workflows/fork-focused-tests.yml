@@ -17,6 +17,8 @@ on:
       - ".github/workflows/fork-focused-tests.yml"
       - "tests/fork/**"
       - "tests/browser/**"
+      - "tests/e2e/**"
+      - "frontend/src/components/UserMenu/**"
       - "server/utils/nytedesk/**"
       - "server/endpoints/nytedesk.js"
       - "frontend/**"
@@ -86,10 +88,73 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "24"
-      - name: Install playwright-core (no browser download)
-        run: npm install --no-save --no-package-lock --prefix "$RUNNER_TEMP/pw" playwright-core@1
+      - name: Install the pinned browser driver (lockfile, integrity-checked)
+        run: npm ci --prefix tests/e2e --ignore-scripts --no-audit --no-fund
       - name: Chat font-size browser harness
         env:
-          NODE_PATH: ${{ runner.temp }}/pw/node_modules
+          NODE_PATH: ${{ github.workspace }}/tests/e2e/node_modules
           CHROME: /usr/bin/google-chrome
         run: node tests/browser/chat-font-size.browser.cjs
+
+  # The real app in Chrome: production server + production frontend build, a
+  # fresh SQLite database, real login, seeded users/tasks, mock engines on
+  # loopback. Asserts dashboard behaviour and uploads screenshots. Test-only
+  # random secrets are generated per run; no repository secrets are used.
+  dashboard-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Install server dependencies (lockfile only)
+        run: cd server && yarn install --frozen-lockfile --non-interactive
+      - name: Build frontend
+        run: cd frontend && yarn install --frozen-lockfile --non-interactive && yarn build
+      - name: Prepare server (public build, empty database)
+        run: |
+          rm -rf server/public && cp -r frontend/dist server/public
+          mkdir -p server/storage
+          cd server
+          npx prisma generate --schema=./prisma/schema.prisma
+          npx prisma migrate deploy --schema=./prisma/schema.prisma
+      - name: Install the pinned browser driver (lockfile, integrity-checked)
+        run: npm ci --prefix tests/e2e --ignore-scripts --no-audit --no-fund
+      - name: Start server and run dashboard e2e
+        env:
+          NODE_ENV: production
+          SERVER_PORT: "3001"
+          NYTEDESK_ENABLED: "true"
+          DISABLE_TELEMETRY: "true"
+          VECTOR_DB: lancedb
+          # AnythingLLM's own chat points at the mock Ollama (no real model).
+          LLM_PROVIDER: ollama
+          OLLAMA_BASE_PATH: http://127.0.0.1:41434
+          OLLAMA_MODEL_PREF: qwen3:8b
+          EMBEDDING_ENGINE: native
+          MOCK_OLLAMA_PORT: "41434"
+          MOCK_POLYSTRATA_PORT: "41537"
+          CHROME: /usr/bin/google-chrome
+          SHOTS_DIR: ${{ runner.temp }}/nytedesk-screenshots
+        run: |
+          export JWT_SECRET="$(openssl rand -hex 32)" SIG_KEY="$(openssl rand -hex 32)" SIG_SALT="$(openssl rand -hex 32)"
+          export STORAGE_DIR="$GITHUB_WORKSPACE/server/storage"
+          (cd server && nohup node index.js > "$RUNNER_TEMP/server.log" 2>&1 &)
+          NODE_PATH="$GITHUB_WORKSPACE/tests/e2e/node_modules" node tests/e2e/nytedesk-dashboard.e2e.cjs
+      - name: Server log (on failure)
+        if: failure()
+        run: tail -n 200 "$RUNNER_TEMP/server.log" || true
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nytedesk-dashboard-screenshots
+          path: ${{ runner.temp }}/nytedesk-screenshots
+          # Seeded test data only; kept briefly and visible only to repository readers.
+          retention-days: 7
+          if-no-files-found: warn

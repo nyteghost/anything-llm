@@ -1,0 +1,9 @@
+{
+  "name": "nytedesk-browser-tests",
+  "private": true,
+  "description": "Pinned browser driver for NyteDesk CI browser checks (tests/e2e, tests/browser). Uses the runner's installed Chrome; no browser download.",
+  "license": "MIT",
+  "devDependencies": {
+    "playwright-core": "1.63.0"
+  }
+}

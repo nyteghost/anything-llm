@@ -118,7 +118,10 @@ function createNyteDeskRoutes(app, deps) {
     "/nytedesk/agents",
     mw,
     handler(async (_req, res) => {
-      res.status(200).json({ agents: deps.service().agents() });
+      const svc = deps.service();
+      res
+        .status(200)
+        .json({ agents: svc.agents(), components: svc.components() });
     })
   );
 
@@ -202,6 +205,15 @@ function createNyteDeskRoutes(app, deps) {
     handler(async (req, res, actor) => {
       const task = await taskFor(req, actor);
       send(res, deps.service().cancel(actor, task, body(req), key(req)));
+    })
+  );
+
+  app.get(
+    "/nytedesk/telemetry",
+    mw,
+    handler(async (_req, res, actor) => {
+      res.set("Cache-Control", "no-store");
+      res.status(200).json({ telemetry: deps.service().telemetry(actor) });
     })
   );
 

@@ -183,17 +183,17 @@ function EngineCard({ engine, selection, canCheck, isAdmin, onChanged }) {
       )}
       <div className="flex flex-wrap gap-2 pt-1">
         {canCheck && (
-          <CTAButton disabled={busy} onClick={runCheck}>
+          <CTAButton className="!mr-0" disabled={busy} onClick={runCheck}>
             {busy ? "Checking…" : "Check"}
           </CTAButton>
         )}
         {isAdmin && engine.selectable && !selected && (
-          <CTAButton disabled={busy} onClick={select}>
+          <CTAButton className="!mr-0" disabled={busy} onClick={select}>
             Select
           </CTAButton>
         )}
         {isAdmin && (
-          <CTAButton onClick={() => setEditing(!editing)}>
+          <CTAButton className="!mr-0" onClick={() => setEditing(!editing)}>
             {editing ? "Close" : "Configure"}
           </CTAButton>
         )}

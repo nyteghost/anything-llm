@@ -167,6 +167,7 @@ export default {
     },
     systemPromptVariables: () => "/settings/system-prompt-variables",
     nytedesk: () => "/settings/nytedesk",
+    nytedeskDashboard: () => "/nytedesk",
     logs: () => {
       return "/settings/event-logs";
     },
