@@ -131,6 +131,13 @@ jobs:
           NYTEDESK_ENABLED: "true"
           DISABLE_TELEMETRY: "true"
           VECTOR_DB: lancedb
+          # AnythingLLM's own chat points at the mock Ollama (no real model).
+          LLM_PROVIDER: ollama
+          OLLAMA_BASE_PATH: http://127.0.0.1:41434
+          OLLAMA_MODEL_PREF: qwen3:8b
+          EMBEDDING_ENGINE: native
+          MOCK_OLLAMA_PORT: "41434"
+          MOCK_POLYSTRATA_PORT: "41537"
           CHROME: /usr/bin/google-chrome
           SHOTS_DIR: ${{ runner.temp }}/nytedesk-screenshots
         run: |

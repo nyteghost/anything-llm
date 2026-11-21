@@ -50,8 +50,9 @@ function mockEngine(pathName, body) {
     res.end(JSON.stringify(hit ? body : { error: "not found" }));
   });
 }
-const listen = (server) =>
-  new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address().port)));
+// Fixed ports when given, so the server's own LLM setting can point at the mock.
+const listen = (server, port = 0) =>
+  new Promise((resolve) => server.listen(port, "127.0.0.1", () => resolve(server.address().port)));
 
 // ------------------------------------------------------------------ API seeding
 async function api(method, p, { token, body, key = true } = {}) {
@@ -185,7 +186,10 @@ async function main() {
   fs.mkdirSync(SHOTS, { recursive: true });
   const poly = mockEngine("/v1/models", { object: "list", data: [{ id: MODEL, object: "model" }] });
   const ollama = mockEngine("/api/tags", { models: [{ name: "qwen3:8b" }, { name: "nomic-embed-text:latest" }] });
-  const ports = { poly: await listen(poly), ollama: await listen(ollama) };
+  const ports = {
+    poly: await listen(poly, Number(process.env.MOCK_POLYSTRATA_PORT || 0)),
+    ollama: await listen(ollama, Number(process.env.MOCK_OLLAMA_PORT || 0)),
+  };
   await waitForServer();
   const s = await seed(ports);
   ok("seeded users, workspace, engines and tasks through the API");

@@ -17,8 +17,8 @@ import {
 import { Card, muted } from "./ui";
 
 const TITLES = {
-  dashboard: "Main dashboard",
   ...Object.fromEntries(SECTIONS.map((s) => [s.id, s.label])),
+  dashboard: "Main dashboard",
 };
 
 const VIEWS = {
