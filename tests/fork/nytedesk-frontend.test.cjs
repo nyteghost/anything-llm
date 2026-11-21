@@ -24,7 +24,10 @@ test("every dashboard mutation sends an idempotency key and decisions send the r
 });
 
 test("the dashboard offers no way to start or execute a task, and never handles API key values", () => {
-  assert.doesNotMatch(model, /\/start|\/execute|\/run\b/);
+  assert.doesNotMatch(model, /\/start|\/execute/);
+  // The only run call is the gated model control one.
+  assert.deepEqual([...model.matchAll(/taskPath\(task, "(\w+)"\)/g)].map((m) => m[1]).filter((op) => op === "run"), ["run"]);
+  assert.match(model, /runModelTask: \(task\)/);
   assert.doesNotMatch(page + model, /apiKey|api_key/i);
 });
 

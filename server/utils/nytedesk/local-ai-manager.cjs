@@ -203,7 +203,11 @@ function modelNames(api, body) {
   return cleanNames(body.data.map((m) => (m && m.id) || null));
 }
 
-/** One GET to a loopback URL: no redirects, no proxy, bounded time and size. */
+/**
+ * One GET to a loopback URL: no redirects, no proxy, bounded size, and an
+ * elapsed-time deadline (`timeoutMs` counts from the request, not from the
+ * last byte, so a slow trickle cannot hold it open).
+ */
 function getJson(urlText, { timeoutMs, maxBytes }) {
   return new Promise((resolve) => {
     const url = new URL(urlText);
@@ -217,17 +221,22 @@ function getJson(urlText, { timeoutMs, maxBytes }) {
       agent: false,
     };
     let settled = false;
+    let deadline = null;
     const done = (out) => {
       if (!settled) {
         settled = true;
+        clearTimeout(deadline);
         resolve(out);
       }
     };
     const req = http.request(options, (res) => {
       const status = res.statusCode;
       if (status >= 300 && status < 400) {
-        res.resume();
-        return done({ code: "REDIRECT_REFUSED", httpStatus: status });
+        // Refused: close the connection now instead of draining the body.
+        done({ code: "REDIRECT_REFUSED", httpStatus: status });
+        res.destroy();
+        req.destroy();
+        return;
       }
       let size = 0;
       const chunks = [];
@@ -252,10 +261,10 @@ function getJson(urlText, { timeoutMs, maxBytes }) {
       });
       res.on("error", () => done({ code: "NETWORK_ERROR" }));
     });
-    req.setTimeout(timeoutMs, () => {
-      req.destroy();
+    deadline = setTimeout(() => {
       done({ code: "TIMEOUT" });
-    });
+      req.destroy();
+    }, timeoutMs);
     req.on("error", (error) => {
       const refused = error && error.code === "ECONNREFUSED";
       done({ code: refused ? "CONNECTION_REFUSED" : "NETWORK_ERROR" });

@@ -18,7 +18,8 @@ function change(task, operation, actorId = "reviewer", extra = {}) {
 
 test("new tasks are immutable, auditable and gated regardless of action", () => {
   for (const action of Object.values(ACTIONS)) {
-    const task = make({ action });
+    const engine = action.startsWith("engine.model.");
+    const task = make(engine ? { action, adapter: "ollama", target: "qwen3:8b" } : { action });
     assert.equal(task.status, STATES.WAITING);
     assert.equal(task.risk, "approval");
     assert.equal(task.audit[0].sequence, 1);
@@ -111,4 +112,17 @@ test("audit history is never truncated silently", () => {
   raw.audit = Array.from({ length: 128 }, (_, i) => ({ sequence: i + 1, event: "x", actor: "a", at: "t" }));
   raw.nextSequence = 129;
   assert.throws(() => change(raw, "cancel", "developer"), /audit capacity/);
+});
+
+test("engine model control: Ollama only, a valid bound target, and no target on other actions", () => {
+  const load = make({ action: ACTIONS.ENGINE_MODEL_LOAD, adapter: "ollama", target: "qwen3:8b" });
+  assert.equal(load.target, "qwen3:8b");
+  const other = make({ action: ACTIONS.ENGINE_MODEL_LOAD, adapter: "ollama", target: "llama3.2:3b" });
+  assert.notEqual(other.payloadHash, load.payloadHash);
+  assert.throws(() => make({ action: ACTIONS.ENGINE_MODEL_LOAD, adapter: "strata", target: "x" }), /only supported for Ollama/);
+  assert.throws(() => make({ action: ACTIONS.ENGINE_MODEL_UNLOAD, adapter: "ollama" }), /valid model name/);
+  assert.throws(() => make({ action: ACTIONS.ENGINE_MODEL_LOAD, adapter: "ollama", target: "a b" }), /valid model name/);
+  assert.throws(() => make({ action: ACTIONS.MODEL_PROMPT, target: "qwen3:8b" }), /Only model control tasks take a target/);
+  // Changing the bound target after creation is detected like any payload change.
+  assert.throws(() => change({ ...structuredClone(load), target: "llama3.2:3b" }, "approve"), /payload does not match/);
 });

@@ -9,7 +9,9 @@
  *      user, because independent approval needs distinct, verified identities;
  *   3. resolves workspaces only through the injected, permission-aware lookups.
  * A task in a workspace the user cannot access is reported as 404, never 403.
- * There is no route that starts, runs or executes a task.
+ * The only route that runs a task is POST /nytedesk/tasks/:id/run, and it
+ * runs only approved engine model load/unload tasks when the owner has set
+ * NYTEDESK_MODEL_CONTROL=true. Agent tasks are never run.
  */
 const { NyteDeskError } = require("./store.cjs");
 
@@ -205,6 +207,16 @@ function createNyteDeskRoutes(app, deps) {
     handler(async (req, res, actor) => {
       const task = await taskFor(req, actor);
       send(res, deps.service().cancel(actor, task, body(req), key(req)));
+    })
+  );
+
+  app.post(
+    "/nytedesk/tasks/:id/run",
+    mw,
+    handler(async (req, res, actor) => {
+      const task = await taskFor(req, actor);
+      const out = await deps.service().runTask(actor, task, body(req));
+      res.status(200).json(out);
     })
   );
 

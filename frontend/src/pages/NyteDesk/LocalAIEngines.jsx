@@ -5,7 +5,7 @@ import showToast from "@/utils/toast";
 
 const TEXT = {
   description:
-    "Local inference engines NyteDesk can see. NyteDesk only reads each engine's model list over loopback HTTP. It never starts, stops, restarts, unloads or kills an engine: running engines are externally owned.",
+    "Local inference engines NyteDesk can see. NyteDesk reads each engine's model list over loopback HTTP. It never starts, stops, restarts or kills an engine: running engines are externally owned. Loading or unloading a model in Ollama is only possible through an approved task, when the owner has turned model control on.",
   polystrata:
     "PolyStrata's port can change between sessions; update the endpoint when it does.",
   strata: "Strata has no default endpoint; set its endpoint and API style.",

@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import {
   ArrowLeft,
   CheckCircle,
+  Lightning,
   ShieldWarning,
   XCircle,
 } from "@phosphor-icons/react";
@@ -10,8 +11,10 @@ import NyteDesk from "@/models/nytedesk";
 import showToast from "@/utils/toast";
 import {
   ACTION_INFO,
+  MODEL_CONTROL_ACTIONS,
   createSequencer,
   describeAdapter,
+  modelOutcome,
   provenance,
   reviewBinding,
   reviewMatches,
@@ -108,6 +111,34 @@ export default function ApprovalInspector({
   const target = describeAdapter(task.adapter);
   const blocked = decisionBlocker(detail, user);
   const reviewed = reviewMatches(reviewedFor, task);
+  const isModelTask = MODEL_CONTROL_ACTIONS.includes(task.action);
+  const outcome = isModelTask ? modelOutcome(audit) : null;
+  const operationLabel =
+    task.action === "engine.model.load"
+      ? `Load ${task.target} now`
+      : `Unload ${task.target} now`;
+
+  // Run an approved model load/unload. The server re-checks the approval,
+  // the engine and the model state first; the version prevents a second run.
+  const runModel = async () => {
+    if (task.id !== taskId || !detail.canRun) return;
+    setBusy(true);
+    const r = await NyteDesk.runModelTask(task);
+    setBusy(false);
+    if (!r.ok) {
+      showToast(r.error, "error");
+    } else {
+      const ok = r.data?.task?.status === "succeeded";
+      showToast(
+        ok
+          ? "The engine confirmed the operation"
+          : "The operation failed; see the evidence",
+        ok ? "success" : "error"
+      );
+    }
+    await load();
+    onChanged?.();
+  };
 
   const act = async (op) => {
     // Approval needs a confirmation of exactly this revision, never an older one.
@@ -169,6 +200,12 @@ export default function ApprovalInspector({
             <dd className="font-mono">{task.action}</dd>
             <dt className={muted}>Addressed to</dt>
             <dd>{`${target.name} (${target.role})`}</dd>
+            {task.target && (
+              <>
+                <dt className={muted}>Model</dt>
+                <dd className="font-mono break-all">{task.target}</dd>
+              </>
+            )}
             <dt className={muted}>Workspace</dt>
             <dd>{task.workspaceSlug || `#${task.workspaceId}`}</dd>
             <dt className={muted}>Task version</dt>
@@ -208,7 +245,13 @@ export default function ApprovalInspector({
             <dt className={muted}>Permission requested</dt>
             <dd>{info.label}</dd>
             <dt className={muted}>Execution</dt>
-            <dd>Disabled. Approval records the decision; nothing runs.</dd>
+            <dd>
+              {!isModelTask
+                ? "Disabled. Approval records the decision; nothing runs."
+                : detail.modelControl
+                  ? "Model control is on. After approval, a manager or administrator who is not the requester runs it; NyteDesk re-checks the approval and the engine first."
+                  : "Disabled. Model control is off on this server."}
+            </dd>
             <dt className={muted}>Approval validity</dt>
             <dd>Bound to this payload hash, expires after 24 hours</dd>
           </dl>
@@ -230,8 +273,37 @@ export default function ApprovalInspector({
                 ? "Verified"
                 : `FAILED: ${auditProblems.join("; ")}`}
             </dd>
-            <dt className={muted}>Attachments</dt>
-            <dd>None. Tasks do not store evidence records yet.</dd>
+            {outcome ? (
+              <>
+                <dt className={muted}>Outcome</dt>
+                <dd
+                  className={
+                    outcome.succeeded
+                      ? "text-emerald-300 light:text-emerald-700"
+                      : "text-red-300"
+                  }
+                >
+                  {`${outcome.succeeded ? "Confirmed" : "Failed"} (${outcome.code})${outcome.message ? `: ${outcome.message}` : ""}`}
+                </dd>
+                <dt className={muted}>Engine answer</dt>
+                <dd>{`HTTP ${outcome.httpStatus ?? "none"} in ${outcome.durationMs ?? "?"} ms`}</dd>
+                <dt className={muted}>Loaded before</dt>
+                <dd className="font-mono break-all">
+                  {(outcome.loadedBefore || []).join(", ") || "none"}
+                </dd>
+                <dt className={muted}>Loaded after</dt>
+                <dd className="font-mono break-all">
+                  {outcome.loadedAfter === null
+                    ? "could not be read"
+                    : (outcome.loadedAfter || []).join(", ") || "none"}
+                </dd>
+              </>
+            ) : (
+              <>
+                <dt className={muted}>Attachments</dt>
+                <dd>None. Tasks do not store evidence records yet.</dd>
+              </>
+            )}
           </dl>
         </Card>
 
@@ -317,6 +389,49 @@ export default function ApprovalInspector({
             )}
           </>
         )}
+        {detail.canRun && (
+          <div className="flex flex-col gap-1">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={runModel}
+              className="self-start flex items-center gap-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-40 text-white text-sm font-medium px-3 py-1.5"
+            >
+              <Lightning size={16} aria-hidden="true" />
+              {busy ? "Working…" : operationLabel}
+            </button>
+            <p className={`text-xs ${muted}`}>
+              Approved. NyteDesk re-checks the approval, the engine and the
+              model state, then sends one request to the running engine. The
+              engine itself is never started or stopped.
+            </p>
+          </div>
+        )}
+        {isModelTask &&
+          task.status === "approved" &&
+          detail.modelControl &&
+          !detail.canRun &&
+          detail.runBlockedReason && (
+            <p className={`text-sm ${muted}`}>
+              {`Run unavailable: ${detail.runBlockedReason}.`}
+            </p>
+          )}
+        {isModelTask &&
+          task.status === "running" &&
+          (detail.operationInFlight ? (
+            <p className="text-sm" role="status">
+              The request has been sent to the engine and is in flight.
+              Cancelling is refused until the engine answers; its outcome will
+              be recorded here either way.
+            </p>
+          ) : (
+            <p className="text-sm" role="status">
+              No live request owns this task, for example after a server
+              restart. Cancelling only closes the task for the record: it cannot
+              undo anything the engine may already have done. Check the
+              engine&apos;s loaded models before proposing another operation.
+            </p>
+          ))}
         {detail.canCancel && (
           <button
             type="button"

@@ -3,6 +3,9 @@
 /**
  * NyteDesk control-plane primitives.
  * No shell, browser, model, network or filesystem execution is exposed here.
+ * Engine model control (load/unload a model in a running engine) is a task
+ * action like any other: it is approved here and run elsewhere
+ * (model-control.cjs), only when the owner enables it.
  * Callers must enforce authentication, workspace authorization, persistence,
  * and transaction isolation before exposing these primitives via HTTP.
  */
@@ -32,7 +35,21 @@ const ACTIONS = Object.freeze({
   CREDENTIAL_ACCESS: "credential.access",
   PRIVILEGE_CHANGE: "privilege.change",
   EXTERNAL_PUBLISH: "external.publish",
+  ENGINE_MODEL_LOAD: "engine.model.load",
+  ENGINE_MODEL_UNLOAD: "engine.model.unload",
 });
+
+/**
+ * Engine model control: ask an already running engine, over its own HTTP API,
+ * to load or unload one named model. Not agent execution: no process, shell,
+ * VM or credential is involved. Only engines listed here may be targeted.
+ */
+const ENGINE_CONTROL_ACTIONS = Object.freeze([
+  ACTIONS.ENGINE_MODEL_LOAD,
+  ACTIONS.ENGINE_MODEL_UNLOAD,
+]);
+const ENGINE_CONTROL_ADAPTERS = Object.freeze(["ollama"]);
+const TARGET_RE = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 
 // Every action is approval-gated. Supervised mode is the only operating mode:
 // no action, including reads, runs without a human decision.
@@ -168,6 +185,9 @@ const PAYLOAD_FIELDS = Object.freeze([
   "adapter",
   "action",
 ]);
+// Bound into the payload hash only when present, so tasks created before the
+// field existed keep their recorded hash.
+const OPTIONAL_PAYLOAD_FIELDS = Object.freeze(["target"]);
 
 function assertNonempty(value, field, max = 256) {
   if (typeof value !== "string" || !value.trim() || value.length > max) {
@@ -209,6 +229,11 @@ function canonical(value) {
 function payloadHash(task) {
   const payload = {};
   for (const field of PAYLOAD_FIELDS) payload[field] = task[field];
+  for (const field of OPTIONAL_PAYLOAD_FIELDS) {
+    if (task[field] !== undefined && task[field] !== null) {
+      payload[field] = task[field];
+    }
+  }
   return crypto.createHash("sha256").update(canonical(payload)).digest("hex");
 }
 
@@ -230,6 +255,17 @@ function createTask(fields, options = {}) {
     throw new TypeError("Unsupported adapter");
   }
   if (!Object.hasOwn(RISK, action)) throw new TypeError("Unsupported action");
+  const target = fields.target ?? null;
+  if (ENGINE_CONTROL_ACTIONS.includes(action)) {
+    if (!ENGINE_CONTROL_ADAPTERS.includes(adapter)) {
+      throw new TypeError("Model control is only supported for Ollama");
+    }
+    if (typeof target !== "string" || !TARGET_RE.test(target)) {
+      throw new TypeError("Model control needs a valid model name");
+    }
+  } else if (target !== null) {
+    throw new TypeError("Only model control tasks take a target");
+  }
   const at = (options.now ?? (() => new Date().toISOString()))();
   const task = {
     id: (options.uuid ?? crypto.randomUUID)(),
@@ -238,6 +274,7 @@ function createTask(fields, options = {}) {
     description,
     adapter,
     action,
+    ...(target !== null ? { target } : {}),
     risk: RISK[action],
     status: STATES.WAITING,
     approval: null,
@@ -350,6 +387,9 @@ module.exports = {
   COMPONENTS,
   ADMIN_APPROVAL_ACTIONS,
   EXECUTION_PRECONDITIONS,
+  ENGINE_CONTROL_ACTIONS,
+  ENGINE_CONTROL_ADAPTERS,
+  TARGET_RE,
   MAX_DESCRIPTION,
   createTask,
   transition,
