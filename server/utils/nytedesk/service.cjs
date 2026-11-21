@@ -58,9 +58,11 @@ const SELECTION_KEY = "engine_selection";
 const SELECTION_MAX_CHECK_AGE_MS = 15 * 60 * 1000;
 /**
  * Why `engine` cannot be selected now, or null when it can. Selection needs
- * fresh, matching evidence: a check of the current endpoint that reached the
- * engine within SELECTION_MAX_CHECK_AGE_MS and listed the configured model.
- * The engines listing and the selection route share this one rule.
+ * fresh, matching evidence: a check of the current endpoint, API and
+ * configured model that reached the engine within SELECTION_MAX_CHECK_AGE_MS
+ * and listed that model. A check made for any other configuration (another
+ * endpoint, API or model) is not evidence for this one. The engines listing
+ * and the selection route share this one rule.
  */
 function selectionBlocker(engine, now) {
   const check = engine.lastCheck;
@@ -70,6 +72,12 @@ function selectionBlocker(engine, now) {
   }
   if (check.endpoint !== engine.endpoint) {
     return "The endpoint changed since the check";
+  }
+  if (check.api !== engine.api) {
+    return "The API style changed since the check";
+  }
+  if ((check.model ?? null) !== (engine.model ?? null)) {
+    return "The configured model changed since the check";
   }
   const age = now - Date.parse(check.checkedAt);
   if (!(age <= SELECTION_MAX_CHECK_AGE_MS)) {
@@ -286,8 +294,12 @@ function createService(store, options = {}) {
   const telemetry = options.telemetry ?? createTelemetry();
   const modelOps = options.modelControl ?? mc;
   const probe = options.probe ?? lam.probeEngine;
-  // One model operation at a time across this server.
-  let modelOperationRunning = false;
+  // One model operation at a time across this server. While set, the live
+  // operation owns `taskId`: it alone may finish that task, and cancelling it
+  // is refused, so the engine's outcome is always recorded. A `running` task
+  // that no live operation owns (e.g. after a crash) can still be cancelled.
+  let liveOperation = null;
+  const ownsTask = (task) => liveOperation?.taskId === task.id;
 
   const modelControlEnabled = () => env.NYTEDESK_MODEL_CONTROL === "true";
   const isEngineControl = (task) =>
@@ -300,14 +312,28 @@ function createService(store, options = {}) {
     };
   }
 
-  function canRun(actor, task) {
-    return (
-      modelControlEnabled() &&
-      isEngineControl(task) &&
-      task.status === cp.STATES.APPROVED &&
-      Number(actor.id) !== Number(task.requesterId) &&
-      DECIDER_ROLES.includes(actor.role)
-    );
+  /**
+   * Why `actor` cannot run `task` now, or null when they can. The same rules
+   * as runTask, including a read-only reauthorization, so the inspector can
+   * hide the run control and say why. runTask still re-checks everything
+   * immediately before dispatch; this is advisory.
+   */
+  function runBlocker(actor, task) {
+    if (!isEngineControl(task)) return "Only model load/unload tasks can run";
+    if (!modelControlEnabled()) return "Model control is off on this server";
+    if (task.status !== cp.STATES.APPROVED) {
+      return `The task is ${task.status}, not approved`;
+    }
+    if (Number(actor.id) === Number(task.requesterId)) {
+      return "The requester cannot run their own task";
+    }
+    if (!DECIDER_ROLES.includes(actor.role)) {
+      return "Only a manager or administrator may run tasks";
+    }
+    const r = store.reauthorize(task.id);
+    if (!r.ok) return `Reauthorization would fail: ${r.problems.join("; ")}`;
+    if (liveOperation) return "Another model operation is running";
+    return null;
   }
 
   function keyPresent(keyEnv) {
@@ -476,8 +502,18 @@ function createService(store, options = {}) {
         canDecide: waiting && canDecide(actor, task),
         canCancel:
           OPEN_STATES.includes(task.status) &&
+          !ownsTask(task) &&
           (isRequester || DECIDER_ROLES.includes(actor.role)),
-        canRun: canRun(actor, task),
+        ...(() => {
+          const blocker = isEngineControl(task)
+            ? runBlocker(actor, task)
+            : null;
+          return {
+            canRun: isEngineControl(task) && blocker === null,
+            runBlockedReason: blocker,
+          };
+        })(),
+        operationInFlight: ownsTask(task),
         modelControl: modelControlEnabled(),
       };
     },
@@ -520,10 +556,11 @@ function createService(store, options = {}) {
         const why = r.problems.join("; ");
         throw new NyteDeskError(409, `Reauthorization failed: ${why}`);
       }
-      if (modelOperationRunning) {
+      if (liveOperation) {
         throw new NyteDeskError(409, "Another model operation is running");
       }
-      modelOperationRunning = true;
+      // From here on, every path releases the lock (finally).
+      liveOperation = { taskId: task.id };
       try {
         const engine = service
           .engines(actor)
@@ -531,7 +568,9 @@ function createService(store, options = {}) {
         if (!engine || !engine.endpoint) {
           throw new NyteDeskError(409, "The engine has no endpoint");
         }
-        // Fresh read-only check: the engine answers and lists the model.
+        // Fresh read-only check for THIS task's model. It is kept out of the
+        // engine's saved checks, which are selection evidence for the
+        // configured model; it goes into this task's evidence instead.
         const check = await probe(
           {
             id: engine.id,
@@ -541,7 +580,6 @@ function createService(store, options = {}) {
           },
           options.probeOptions ?? {}
         );
-        store.saveEngineCheck(engine.id, actor, check);
         if (
           check.status !== lam.STATUSES.EXTERNAL ||
           check.modelListed !== true
@@ -570,14 +608,27 @@ function createService(store, options = {}) {
         if (operation === "unload" && !isLoaded) {
           throw new NyteDeskError(409, "The model is not loaded");
         }
+        // startTask re-runs reauthorize and checks the version inside its
+        // own transaction, immediately before dispatch.
         const running = store.startTask(task.id, actor, {
           expectedVersion: task.version,
           executionEnabled: true,
         });
-        const result = await modelOps.runModelOperation(
-          { endpoint: engine.endpoint, model: task.target, operation },
-          options.modelOptions
-        );
+        let result;
+        try {
+          result = await modelOps.runModelOperation(
+            { endpoint: engine.endpoint, model: task.target, operation },
+            options.modelOptions
+          );
+        } catch {
+          result = {
+            ok: false,
+            code: "INTERNAL_ERROR",
+            httpStatus: null,
+            durationMs: null,
+            loadedAfter: null,
+          };
+        }
         const evidence = {
           operation,
           engine: engine.id,
@@ -587,9 +638,16 @@ function createService(store, options = {}) {
           message: mc.DIAGNOSTICS[result.code] ?? null,
           httpStatus: result.httpStatus,
           durationMs: result.durationMs,
+          freshCheck: {
+            checkedAt: check.checkedAt,
+            httpStatus: check.httpStatus,
+            modelListed: check.modelListed,
+          },
           loadedBefore: before.models,
           loadedAfter: result.loadedAfter,
         };
+        // The live operation owns the task, so nothing else can have moved
+        // it out of `running` in this process.
         const done = store.finishTask(task.id, actor, {
           expectedVersion: running.version,
           outcome: result.ok ? "succeed" : "fail",
@@ -597,7 +655,7 @@ function createService(store, options = {}) {
         });
         return { task: publicTask(done), result: evidence };
       } finally {
-        modelOperationRunning = false;
+        liveOperation = null;
       }
     },
 
@@ -634,6 +692,12 @@ function createService(store, options = {}) {
         throw new NyteDeskError(
           403,
           "Only the requester or a manager/administrator may cancel"
+        );
+      }
+      if (ownsTask(task)) {
+        throw new NyteDeskError(
+          409,
+          "The engine request for this task is in flight. Cancelling is refused until the engine answers and its outcome is recorded."
         );
       }
       const { expectedVersion, reason } = body || {};

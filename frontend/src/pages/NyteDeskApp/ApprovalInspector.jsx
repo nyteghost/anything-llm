@@ -407,11 +407,31 @@ export default function ApprovalInspector({
             </p>
           </div>
         )}
-        {isModelTask && task.status === "running" && (
-          <p className="text-sm" role="status">
-            The engine is working on this request.
-          </p>
-        )}
+        {isModelTask &&
+          task.status === "approved" &&
+          detail.modelControl &&
+          !detail.canRun &&
+          detail.runBlockedReason && (
+            <p className={`text-sm ${muted}`}>
+              {`Run unavailable: ${detail.runBlockedReason}.`}
+            </p>
+          )}
+        {isModelTask &&
+          task.status === "running" &&
+          (detail.operationInFlight ? (
+            <p className="text-sm" role="status">
+              The request has been sent to the engine and is in flight.
+              Cancelling is refused until the engine answers; its outcome will
+              be recorded here either way.
+            </p>
+          ) : (
+            <p className="text-sm" role="status">
+              No live request owns this task, for example after a server
+              restart. Cancelling only closes the task for the record: it cannot
+              undo anything the engine may already have done. Check the
+              engine&apos;s loaded models before proposing another operation.
+            </p>
+          ))}
         {detail.canCancel && (
           <button
             type="button"

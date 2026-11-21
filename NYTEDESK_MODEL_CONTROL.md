@@ -48,10 +48,12 @@ With it off, everything behaves exactly as in the PR #7 owner verification:
    - the version matches;
    - `reauthorize` passes: still approved, the hash is still bound, not expired, the decision record matches, the approver isn't the requester, and the audit chain is intact;
    - no other model operation is running on this server;
-   - a **fresh** engine check succeeds and lists the model;
+   - a **fresh** engine check succeeds and lists the model. This task probe is recorded in the task's evidence (`freshCheck`). It is **not** saved as the engine's check, because saved checks are selection evidence for the configured model;
    - `/api/ps` is readable, the model isn't already loaded (for load) and is loaded (for unload).
 
-   Only then is the task moved to `running` (`task.start`) and the single request sent.
+   Only then is the task moved to `running` (`task.start`) and the single request sent. `startTask` re-runs `reauthorize` and the version check inside its own transaction, immediately before dispatch.
+
+   **Run eligibility in the UI:** the task detail reports `canRun` and `runBlockedReason`, using the same rules plus a read-only `reauthorize`. The inspector hides the run control and shows the reason when a run would be refused, for example "Reauthorization would fail: approval expired". This is advisory; the run path re-checks everything.
 4. **Record:** `task.succeed` or `task.fail` goes into the audit chain. The evidence includes:
    - the operation, engine, endpoint and model;
    - the result code and message;
@@ -60,29 +62,57 @@ With it off, everything behaves exactly as in the PR #7 owner verification:
 
    The inspector shows it under *Supporting evidence*.
 
-**What the refusals change:** any refusal before step 3's start leaves the task `approved` and sends no load or unload request. After a start, a crash leaves the task `running`; the requester or a manager/admin can still cancel it.
+**What the refusals change:** any refusal before step 3's start leaves the task `approved` and sends no load or unload request.
+
+**Cancellation after dispatch:** from `task.start` until the outcome is recorded, the live operation **owns** the task.
+- Cancelling it is refused with 409 ("in flight"), for the requester, managers and admins alike, so the engine's outcome is always recorded as `task.succeed` or `task.fail`.
+- The detail reports `operationInFlight: true` and `canCancel: false`. The inspector says that cancelling is refused until the engine answers.
+- A `running` task that **no live operation owns** can still be cancelled. That happens when the process crashed or restarted after `task.start`. The inspector says that cancelling only closes the task for the record, cannot undo what the engine may already have done, and that you should check the engine's loaded models.
+- Ownership is per server process. Several NyteDesk processes sharing one database are not supported.
+
+**Deadlines:** every engine request has an **elapsed-time** deadline that counts from when the request is made, so a response that trickles bytes cannot extend it:
+- fresh probe 3 s (the same default as a manual Check);
+- `/api/ps` 5 s;
+- load 180 s;
+- unload 30 s.
+
+A refused redirect closes the connection immediately instead of draining the body. Response-size limits are unchanged: 1 MiB for the probe, 256 KiB for model control. The operation lock is released on every path (`finally`): success, failure, refusal before dispatch, and an unexpected executor error, which fails the task with `INTERNAL_ERROR` evidence.
+
+**Engine selection evidence:** selection (`selectionBlocker`) now needs a fresh check of the current **endpoint, API style and configured model**. Evidence recorded for any other configuration is rejected.
 
 ## Files
 - **Server:**
   - `control-plane.cjs`: the actions, `target`, and validation.
   - `store.cjs`: an additive `target` column with an immutability trigger, and `finishTask`.
-  - `model-control.cjs` (new): the HTTP client. It accepts loopback only, follows no redirects, and has bounded time and size limits.
-  - `service.cjs`: `runTask` and `canRun`.
+  - `model-control.cjs` (new): the HTTP client. It accepts loopback only, follows no redirects, and has bounded elapsed time and size limits.
+  - `local-ai-manager.cjs`: the read-only GET now has an elapsed deadline and closes refused redirects immediately.
+  - `service.cjs`: `runTask`, `runBlocker` (eligibility and reason), live-operation ownership and the cancellation rule, and selection evidence bound to the API and model.
   - `routes.cjs`: the run route.
 - **UI:**
   - The propose form gets a model picker fed by the last Ollama check.
-  - The inspector gets a model row, honest execution text, the outcome evidence, and a "Load/Unload *model* now" button, shown only when the server reports `canRun`.
+  - The inspector gets a model row, honest execution text and the outcome evidence. The "Load/Unload *model* now" button is shown only when the server reports `canRun`; otherwise the inspector shows `runBlockedReason`. It also explains what cancellation can do while the task is `running`.
 - **Tests:**
-  - New `tests/fork/nytedesk-model-control.test.cjs` (13 tests) runs against a stateful fake Ollama. It covers the setting off, proposal validation, refusals (requester, default role, unapproved, agent action, stale version), a successful load/unload with the exact engine calls and payloads, already-loaded and not-loaded, an engine that errors or doesn't change state, concurrency, an expired approval, the immutable target, legacy hash compatibility, and the process route.
+  - New `tests/fork/nytedesk-model-control.test.cjs` (23 tests) runs against a stateful fake Ollama. It covers the setting off, proposal validation, refusals (requester, default role, unapproved, agent action, stale version), a successful load/unload with the exact engine calls and payloads, already-loaded and not-loaded, an engine that errors or doesn't change state, concurrency, an expired approval, the immutable target, legacy hash compatibility, and the process route.
+  - It also has the review regression tests:
+    - cancel refused while in flight, with the outcome recorded;
+    - cancel allowed for a stranded `running` task;
+    - run eligibility and its reasons, including an expired approval;
+    - an executor error fails the task and releases the lock;
+    - a task probe for model B doesn't touch the selection evidence for model A, and mismatched evidence is rejected;
+    - elapsed deadlines against a trickling local double;
+    - immediate redirect close in both clients;
+    - the size limit;
+    - loopback-only endpoints;
+    - a real legacy database created with the `e26e36a` store (verbatim fixture in `tests/fork/fixtures/nytedesk-e26e36a/`).
   - Updated tests now allow exactly one run route and one run client call.
 
 ## Known limits
 - The 30-minute keep-alive is fixed in the code.
-- The single-operation lock is per server process, not across several servers sharing one database.
+- The single-operation lock and task ownership are per server process, not across several servers sharing one database.
 - No UI e2e for the new controls yet. The API, store and state machine paths are covered over real HTTP.
 - A large model can take longer than the 180 s load timeout. That records `TIMEOUT` and fails the task, even if Ollama finishes loading later. The next load task would then be refused as "already loaded".
 
-## CI evidence at `078ba30`
+## CI evidence at `078ba30` (reviewed head `9c7104b`)
 | Check | Run | Result |
 |---|---|---|
 | Lint, server and frontend | 44874592021 | ✅ (the first run at `caff5ec` found 2 prettier nits, fixed in `078ba30`) |
@@ -90,9 +120,14 @@ With it off, everything behaves exactly as in the PR #7 owner verification:
 | Fork tests (`focused-tests`) | 44874592113 | ✅ 149/149, 0 skipped |
 | Production `vite build` | 44874592113 | ✅ |
 | Browser harness | 44874592113 | ✅ |
-| Real app in Chrome (`dashboard-e2e`) | 44874592113 | ✅ 32/32 on attempt 3; attempts 1 and 2 failed in the N2 resize step (known **K1** flake) |
+| Real app in Chrome (`dashboard-e2e`) | 44874592113 | ✅ 32/32 on attempt 3. Attempts 1 and 2 failed in **different** places; see below |
 
-**K1 evidence:** rerunning the PR #7 base's own e2e (run 44848801065 at `1d27068`) on 2026-11-21 failed with the identical assertion: focus on the chat `TEXTAREA` after 29 checks. So the flake predates this branch. PR #8 contains the K1 fix (stable `ResizableSplit` structure) and still needs independent re-review.
+**Chrome attempts at `078ba30` (corrected 2026-11-21; the earlier summary wrongly put both failures under K1):**
+- **Attempt 1** failed at `tests/e2e/nytedesk-dashboard.e2e.cjs:629`, after the resize: focus had landed on the chat `TEXTAREA` instead of the current navigation link. Rerunning the PR #7 lineage (run 44848801065 at `1d27068`) reproduced **that same assertion**, so it predates this branch. This is the known K1 behaviour; PR #8 contains the proposed K1 fix and still needs independent re-review.
+- **Attempt 2** failed earlier, at line 609, **before any resize**: it timed out after 30 s waiting for the mobile Navigation dialog to appear. Its cause is **unverified**. There's no evidence yet that it is K1 or that it predates this branch.
+- **Attempt 3** passed 32/32.
+
+The review fixes since `9c7104b` have not been through CI; they are local only.
 
 ## Owner verification (when the review is done)
 These steps use the same VM procedure as `NYTEDESK_OWNER_VERIFICATION.md` (tunnels, launcher, users).

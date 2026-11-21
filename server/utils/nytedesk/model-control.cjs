@@ -26,7 +26,11 @@ const MAX_RESPONSE_BYTES = 256 * 1024;
 // How long Ollama keeps a model loaded after NyteDesk loads it.
 const KEEP_ALIVE = "30m";
 
-/** One request to a loopback URL; resolves (never rejects) with a result. */
+/**
+ * One request to a loopback URL; resolves (never rejects) with a result.
+ * `timeoutMs` is an elapsed-time deadline from the moment the request is
+ * made: a response that trickles bytes cannot extend it.
+ */
 function requestJson(urlText, { method, payload, timeoutMs }) {
   return new Promise((resolve) => {
     const url = new URL(urlText);
@@ -45,17 +49,22 @@ function requestJson(urlText, { method, payload, timeoutMs }) {
       agent: false,
     };
     let settled = false;
+    let deadline = null;
     const done = (out) => {
       if (!settled) {
         settled = true;
+        clearTimeout(deadline);
         resolve(out);
       }
     };
     const req = http.request(options, (res) => {
       const status = res.statusCode;
       if (status >= 300 && status < 400) {
-        res.resume();
-        return done({ code: "REDIRECT_REFUSED", httpStatus: status });
+        // Refused: close the connection now instead of draining the body.
+        done({ code: "REDIRECT_REFUSED", httpStatus: status });
+        res.destroy();
+        req.destroy();
+        return;
       }
       let size = 0;
       const chunks = [];
@@ -80,10 +89,10 @@ function requestJson(urlText, { method, payload, timeoutMs }) {
       });
       res.on("error", () => done({ code: "NETWORK_ERROR" }));
     });
-    req.setTimeout(timeoutMs, () => {
-      req.destroy();
+    deadline = setTimeout(() => {
       done({ code: "TIMEOUT" });
-    });
+      req.destroy();
+    }, timeoutMs);
     req.on("error", (error) => {
       const refused = error && error.code === "ECONNREFUSED";
       done({ code: refused ? "CONNECTION_REFUSED" : "NETWORK_ERROR" });
@@ -173,6 +182,8 @@ const DIAGNOSTICS = Object.freeze({
     "The engine answered, but its loaded-model list could not be read afterwards.",
   STATE_MISMATCH:
     "The engine answered, but the loaded-model list does not show the expected change.",
+  INTERNAL_ERROR:
+    "NyteDesk could not complete the request; the engine's state is unknown. Check its loaded models.",
   ...lam.DIAGNOSTICS,
 });
 
