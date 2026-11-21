@@ -73,7 +73,7 @@ With it off, everything behaves exactly as in the PR #7 owner verification:
   - The propose form gets a model picker fed by the last Ollama check.
   - The inspector gets a model row, honest execution text, the outcome evidence, and a "Load/Unload *model* now" button, shown only when the server reports `canRun`.
 - **Tests:**
-  - New `tests/fork/nytedesk-model-control.test.cjs` (15 tests) runs against a stateful fake Ollama. It covers the setting off, proposal validation, refusals (requester, default role, unapproved, agent action, stale version), a successful load/unload with the exact engine calls and payloads, already-loaded and not-loaded, an engine that errors or doesn't change state, concurrency, an expired approval, the immutable target, legacy hash compatibility, and the process route.
+  - New `tests/fork/nytedesk-model-control.test.cjs` (13 tests) runs against a stateful fake Ollama. It covers the setting off, proposal validation, refusals (requester, default role, unapproved, agent action, stale version), a successful load/unload with the exact engine calls and payloads, already-loaded and not-loaded, an engine that errors or doesn't change state, concurrency, an expired approval, the immutable target, legacy hash compatibility, and the process route.
   - Updated tests now allow exactly one run route and one run client call.
 
 ## Known limits
