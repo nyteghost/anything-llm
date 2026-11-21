@@ -198,3 +198,58 @@ Screenshots artifact `14684752143` (expires 2026-11-28) holds seeded data only. 
 - The e2e simulates a hidden tab and aged data by overriding `document.hidden` and `Date.now` in the page; it does not actually background a browser tab.
 - Claude could not open the screenshot artifact from his sandbox; the behaviour is evidenced by the assertions.
 - Still not done: the owner's hardware or engines, a screen reader, an axe or contrast scan, Safari and Firefox.
+
+## 11. Owner verification (owner run, 2026-11-21)
+
+**The owner declared PR #7 "owner verified"** on 2026-11-21 after running `NYTEDESK_OWNER_VERIFICATION.md` on the dedicated VM `agentbridge-vm`. Every command was run by the owner; Claude only read the pasted output and screenshots. The code under test is the accepted `1d27068`; the branch tip `777e6d1` adds documents only (the owner confirmed that the diff against `1d27068` contains only `.md` files).
+
+### Setup
+- VM: Arch on Unraid `tower`, at 10.200.1.124. The checkout's own Node 24.22.3 and Yarn 1.22.22; system Node 26.13.1 is used only for `--check`.
+- Engines stay on the owner's desktop and are reached through SSH reverse tunnels started from the desktop:
+  - VM port 41434 → desktop Ollama on 11434;
+  - VM port 41600 → desktop Strata on 40538.
+  - PolyStrata was not running.
+  - VM port 11434 was deliberately left unconnected, so AnythingLLM's own chat cannot reach the GPU.
+- Browser access went through `ssh -L 127.0.0.1:13002:127.0.0.1:3002`.
+- Launched with `export NYTEDESK_ENABLED=true; tools/linux-run.sh`.
+
+### Results
+| Area | Evidence | Result |
+|---|---|---|
+| Repo and tests | HEAD `777e6d1`; Stage 2 offline tests | ✅ 135/135, 0 skipped |
+| GPU baseline (desktop) | `nvidia-smi`, `/api/ps` | 9229 MiB, 3%; `{"models":[]}` (Strata had a model loaded on its own) |
+| Ollama Check | card: `reachable`, HTTP 200 in 22 ms, models listed | ✅ |
+| Strata Check | card: `check failed`, HTTP 401 in 2 ms, `HTTP_ERROR`; no Select button | ✅ failure path |
+| Missing API style | `API_UNKNOWN`, refused before Strata was contacted | ✅ fail-safe |
+| Select | "Coordinator engine: ollama at http://127.0.0.1:41434"; model none | ✅ records the choice only |
+| No model load | `/api/ps` empty after Check, after Select and at the end; VRAM 9091, 9095 and 9167 MiB (0–3%) | ✅ |
+| Default user | System health "Restricted"; no metrics; engines page read-only; no decision buttons | ✅ |
+| Manager | metrics shown (CPU 0.3% of 4 cores, RAM 1.0/7.7 GB, GPU unavailable); Check only | ✅ |
+| Admin | Configure and Select available | ✅ |
+| Approval integrity | task proposed by user #3 (default): exact operation, provenance, payload hash, "bound to this payload hash, expires after 24 hours", execution disabled; requester sees "Someone else must approve or reject it"; rejected by user #2 (manager); audit history `task.created` then `task.deny`, chain Verified; version 2 → 3; "not awaiting approval" afterwards | ✅ |
+| Listeners (VM) | NyteDesk only on loopback | ✅ (OS services: resolved on 127.0.0.53/54, LLMNR on 0.0.0.0:5355; not NyteDesk) |
+| Processes (VM) | launcher → 2 × `node index.js`; no shell, `nvidia-smi` or engine children; `pgrep` matched only `avahi-daemon` by hostname | ✅ |
+| Engines after the run | Strata still HTTP 401; Ollama `{"models":[]}` | ✅ untouched |
+
+### Findings for follow-up (not blockers)
+1. **Engine credentials.** Strata requires an API key, and NyteDesk refuses secret fields by design. Strata model listing and selection cannot be verified. A design decision is needed.
+2. **Misleading label.** The dashboard's Agents panel shows Strata as "Unreachable", but it answered HTTP 401. The Local AI Manager card says "check failed", correctly. Suggested fix: "Check failed" or "Auth required".
+3. **Embedded chat navigation.** Sending from the playground's start composer opens the full chat thread and leaves `/nytedesk` (upstream thread creation).
+4. **Coordinator label.** The playground header says "Coordinator: Ollama" (NyteDesk's selection at 41434), but the chat uses AnythingLLM's own LLM setting (11434). The label can mislead.
+5. **Slow install step.** The puppeteer install step was slow on its second browser download. It finished without needing the `PUPPETEER_SKIP_DOWNLOAD` fallback.
+
+### Owner environment notes (no changes made)
+- The desktop Ollama listens on all interfaces.
+- The VM runs LLMNR on 0.0.0.0:5355.
+- A reverse tunnel fails with "remote port forwarding failed" while an earlier tunnel still holds the port. Close it, then retry.
+
+### Not covered
+- PolyStrata (not running).
+- Strata model listing (needs credentials).
+- The shutdown port-release output was not pasted; the engines were confirmed untouched afterwards.
+- A screen reader, axe or contrast scan, Safari and Firefox.
+- K1 and K2 (PR #8) still need independent re-review.
+
+### Unchanged rules
+- No merge, deploy, dispatch or credential use happened.
+- PR #6 and PR #7 stay unmerged until the owner decides.
