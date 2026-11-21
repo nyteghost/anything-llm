@@ -177,9 +177,7 @@ const router = createBrowserRouter([
       {
         path: "/nytedesk/:section?/:taskId?",
         lazy: async () => {
-          const { default: NyteDeskApp } = await import(
-            "@/pages/NyteDeskApp"
-          );
+          const { default: NyteDeskApp } = await import("@/pages/NyteDeskApp");
           return { element: <PrivateRoute Component={NyteDeskApp} /> };
         },
       },

@@ -140,7 +140,12 @@ async function seed(ports) {
 
 // ------------------------------------------------------------------ browser
 async function signIn(browser, u, options = {}) {
-  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: "dark", ...options });
+  const context = await browser.newContext({
+    viewport: { width: 1440, height: 900 },
+    colorScheme: "dark",
+    acceptDownloads: true,
+    ...options,
+  });
   const page = await context.newPage();
   page.on("pageerror", (e) => pageErrors.push(`${u.username}: ${e.message}`));
   page.on("console", (m) => m.type() === "error" && consoleErrors.push(`${u.username}: ${m.text()}`));
@@ -149,7 +154,25 @@ async function signIn(browser, u, options = {}) {
   await page.locator('input[name="username"]').first().fill(u.username);
   await page.locator('input[name="password"]').first().fill(u.password);
   await page.locator('button[type="submit"]').first().click();
-  await page.waitForFunction(() => !!localStorage.getItem("anythingllm_authToken"), null, { timeout: 20000 });
+  // Until a user has saved their recovery codes, every login shows them first
+  // and stores the session only after Download, then Close.
+  const download = page.getByRole("button", { name: "Download", exact: true });
+  const shown = await download
+    .waitFor({ timeout: 8000 })
+    .then(() => true)
+    .catch(() => false);
+  if (shown) {
+    await Promise.all([page.waitForEvent("download").catch(() => null), download.click()]);
+    await page.getByRole("button", { name: "Close", exact: true }).click();
+  }
+  // The login page stores the session and then redirects home; wait for both.
+  await page.waitForURL((url) => !url.pathname.startsWith("/login"), { timeout: 30000 });
+  await page.waitForFunction(
+    () => !!localStorage.getItem("anythingllm_authToken") && !!localStorage.getItem("anythingllm_user"),
+    null,
+    { timeout: 20000 }
+  );
+  await page.waitForLoadState("networkidle");
   return { context, page };
 }
 
