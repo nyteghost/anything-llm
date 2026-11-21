@@ -148,6 +148,16 @@ jobs:
       - name: Server log (on failure)
         if: failure()
         run: tail -n 200 "$RUNNER_TEMP/server.log" || true
+      - name: Print screenshots into the log (for reviewers without artifact access)
+        if: always()
+        run: |
+          cd "$RUNNER_TEMP/nytedesk-screenshots" 2>/dev/null || exit 0
+          for f in *.png; do
+            convert "$f" -resize '1440x1440>' -quality 72 "${f%.png}.jpg" 2>/dev/null || continue
+            echo "NYTEDESK-SHOT-BEGIN ${f%.png}.jpg"
+            base64 -w 0 "${f%.png}.jpg"; echo
+            echo "NYTEDESK-SHOT-END"
+          done
       - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4
