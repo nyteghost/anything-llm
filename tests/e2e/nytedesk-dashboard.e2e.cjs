@@ -316,8 +316,9 @@ async function main() {
       window.history.pushState({}, "", target);
       window.dispatchEvent(new PopStateEvent("popstate"));
     }, `/workspace/${s.slug}`);
+    // The dashboard's embedded chat also has a textarea: wait for the route change itself.
+    await page.waitForFunction(() => !document.querySelector(".nytedesk-app"), null, { timeout: 20000 });
     await page.locator("textarea").first().waitFor({ timeout: 20000 });
-    assert.equal(await page.locator(".nytedesk-app").count(), 0, "dashboard unmounted");
     assert.equal(await page.evaluate(() => document.body.classList.contains("nytedesk-route")), false);
     const tasksAtUnmount = taskRequests.n;
     telemetryRequests.n = 0;
@@ -348,6 +349,18 @@ async function main() {
     assert.equal(await page.getByRole("separator", { name: "Resize Activity sidebar" }).getAttribute("aria-valuenow"), "380");
     ok("sidebar resizes from the keyboard and the width persists across reload");
     await shot(page, "02-dashboard-sidebar-widened");
+
+    // Typed chat text survives crossing the 1024px breakpoint (the chat is not remounted).
+    const chatBox = page.getByRole("region", { name: "AI chat workspace and agent playground" }).locator("textarea").first();
+    await chatBox.fill("draft that must survive a resize");
+    await page.setViewportSize({ width: 900, height: 900 });
+    await page.waitForFunction(() => document.querySelector("[data-split-layout]")?.dataset.splitLayout === "stacked");
+    assert.equal(await chatBox.inputValue(), "draft that must survive a resize");
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.waitForFunction(() => document.querySelector("[data-split-layout]")?.dataset.splitLayout === "side-by-side");
+    assert.equal(await chatBox.inputValue(), "draft that must survive a resize");
+    await chatBox.fill("");
+    ok("typed chat text survives resizing across the 1024px breakpoint (no remount)");
 
     await page.getByRole("button", { name: "Collapse navigation" }).click();
     await page.reload();
