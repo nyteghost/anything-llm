@@ -3,6 +3,9 @@
 // file maps its states to labels and never upgrades a state. In particular a
 // task the agent reports as finished is "Agent-reported complete", never
 // "verified", because no independent verification record exists yet.
+// A succeeded engine model load/unload is "Engine-confirmed": no agent was
+// involved, and NyteDesk read the engine's loaded-model list right after the
+// request and saw the change (recorded as task evidence).
 
 export const DISPLAY_STATES = Object.freeze([
   {
@@ -19,6 +22,12 @@ export const DISPLAY_STATES = Object.freeze([
     id: "agent_reported_complete",
     label: "Agent-reported complete",
     tracked: true,
+  },
+  {
+    id: "engine_confirmed",
+    label: "Engine-confirmed",
+    tracked: true,
+    note: "Model load/unload only: the engine's loaded-model list showed the change right after the request.",
   },
   {
     id: "independently_verified",
@@ -48,6 +57,7 @@ const TONE = Object.freeze({
   queued: "neutral",
   executing: "active",
   agent_reported_complete: "success",
+  engine_confirmed: "success",
   failed: "danger",
   rejected: "danger",
   cancelled: "neutral",
@@ -60,9 +70,16 @@ export const OPEN_BACKEND_STATES = Object.freeze([
   "running",
 ]);
 
-/** Display state for a backend status; unknown statuses are shown as such. */
-export function displayState(status) {
-  const id = BACKEND_TO_DISPLAY[status];
+/**
+ * Display state for a backend status; unknown statuses are shown as such.
+ * Pass the task's action so a succeeded model load/unload is shown as
+ * engine-confirmed rather than as an agent report.
+ */
+export function displayState(status, action) {
+  const id =
+    status === "succeeded" && MODEL_CONTROL_ACTIONS.includes(action)
+      ? "engine_confirmed"
+      : BACKEND_TO_DISPLAY[status];
   if (!id) {
     return {
       id: "unknown",
@@ -126,7 +143,59 @@ export const ACTION_INFO = Object.freeze({
     label: "Publish externally",
     scope: "External services",
   },
+  "engine.model.load": {
+    label: "Load a model",
+    scope: "Inference engine (load a model)",
+  },
+  "engine.model.unload": {
+    label: "Unload a model",
+    scope: "Inference engine (unload a model)",
+  },
 });
+
+/** Engine model control actions (load/unload in a running engine). */
+export const MODEL_CONTROL_ACTIONS = Object.freeze([
+  "engine.model.load",
+  "engine.model.unload",
+]);
+
+/**
+ * Messages for the outcome codes that only model control produces. They must
+ * match server/utils/nytedesk/model-control.cjs DIAGNOSTICS (a test checks).
+ * Tasks run before 0eda7a3 recorded the read-only check's wording for OK
+ * ("Engine reachable; models listed."); the inspector therefore derives the
+ * message from the recorded code, and the audit entry itself is untouched.
+ */
+export const MODEL_OUTCOME_MESSAGES = Object.freeze({
+  OK: "The engine confirmed the operation.",
+  STATE_UNVERIFIED:
+    "The engine answered, but its loaded-model list could not be read afterwards.",
+  STATE_MISMATCH:
+    "The engine answered, but the loaded-model list does not show the expected change.",
+  INTERNAL_ERROR:
+    "NyteDesk could not complete the request; the engine's state is unknown. Check its loaded models.",
+});
+
+/**
+ * The recorded outcome evidence of a model control task, or null.
+ * `message` is derived from the recorded `code` when model control defines
+ * it, otherwise the recorded message; `recordedMessage` is the audit text as
+ * stored.
+ */
+export function modelOutcome(audit = []) {
+  const last = [...audit]
+    .reverse()
+    .find((e) => e.event === "task.succeed" || e.event === "task.fail");
+  if (!last || !last.detail || !last.detail.operation) return null;
+  const recordedMessage = last.detail.message ?? null;
+  return {
+    ...last.detail,
+    message: MODEL_OUTCOME_MESSAGES[last.detail.code] ?? recordedMessage,
+    recordedMessage,
+    succeeded: last.event === "task.succeed",
+    at: last.at,
+  };
+}
 
 /** Approval level, from the server's `protected` flag (never guessed). */
 export function riskLevel(isProtected) {
@@ -174,7 +243,9 @@ export function provenance(task, audit = []) {
   if (task.status === "succeeded") {
     lines.push({
       label: "Outcome",
-      value: "Reported complete by the agent. Not independently verified.",
+      value: MODEL_CONTROL_ACTIONS.includes(task.action)
+        ? "Confirmed by the engine: its loaded-model list showed the change right after the request. No agent was involved."
+        : "Reported complete by the agent. Not independently verified.",
     });
   }
   return lines;

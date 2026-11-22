@@ -145,8 +145,10 @@ test("gates: disabled, single-user mode, missing or suspended user", async () =>
   assert.equal(s.body.executionEnabled, false);
 });
 
-test("no route can start, run or execute a task", () => {
-  for (const r of routes) assert.doesNotMatch(r.pattern, /start|run|exec|succeed|fail/i, r.pattern);
+test("no route can start or execute a task; the only run route is the gated model control one", () => {
+  const runRoutes = routes.filter((r) => /run/i.test(r.pattern));
+  assert.deepEqual(runRoutes.map((r) => `${r.method} ${r.pattern}`), ["POST /nytedesk/tasks/:id/run"]);
+  for (const r of routes) assert.doesNotMatch(r.pattern, /start|exec|succeed|fail/i, r.pattern);
 });
 
 test("create needs an idempotency key; a replay returns the same task; key reuse with another body is refused", async () => {

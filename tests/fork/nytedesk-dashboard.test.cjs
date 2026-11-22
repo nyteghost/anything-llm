@@ -42,11 +42,41 @@ test("every backend state maps to its display state; nothing is upgraded", () =>
   assert.match(ts.displayState("mystery").label, /Unknown state \(mystery\)/);
 });
 
+test("a succeeded model load/unload is engine-confirmed; agent tasks stay agent-reported", () => {
+  for (const action of ["engine.model.load", "engine.model.unload"]) {
+    const s = ts.displayState("succeeded", action);
+    assert.equal(s.id, "engine_confirmed", action);
+    assert.equal(s.label, "Engine-confirmed");
+    assert.equal(s.tone, "success");
+    assert.notEqual(s.id, "independently_verified");
+    // Other states of a model task are unchanged.
+    assert.equal(ts.displayState("failed", action).label, "Failed");
+    assert.equal(ts.displayState("approved", action).label, "Approved");
+  }
+  for (const action of ["model.prompt", "vm.execute", undefined]) {
+    assert.equal(ts.displayState("succeeded", action).label, "Agent-reported complete", String(action));
+  }
+  const model = { requesterId: 3, adapter: "ollama", action: "engine.model.load", createdAt: "t0", status: "succeeded" };
+  const outcome = ts.provenance(model, []).find((l) => l.label === "Outcome").value;
+  assert.match(outcome, /^Confirmed by the engine/);
+  assert.match(outcome, /No agent was involved/);
+  assert.doesNotMatch(outcome, /Reported complete by the agent/);
+  // The task list says so too, and only agent tasks carry the unverified flag.
+  const sections = app("sections.jsx");
+  assert.match(sections, /MODEL_CONTROL_ACTIONS\.includes\(t\.action\)/);
+  assert.match(sections, /Confirmed against the engine&apos;s loaded models/);
+  for (const f of ["sections.jsx", "widgets.jsx", "ApprovalInspector.jsx"]) {
+    const src = app(f);
+    assert.doesNotMatch(src, /<StateBadge status=\{[^}]+\} \/>/, `${f}: StateBadge without action`);
+  }
+});
+
 test("the legend lists all eight requested states and marks untracked ones", () => {
   const ids = ts.DISPLAY_STATES.map((s) => s.label);
   for (const l of ["Proposed", "Awaiting approval", "Approved", "Queued", "Executing", "Agent-reported complete", "Independently verified", "Failed", "Cancelled"]) {
     assert.ok(ids.includes(l), l);
   }
+  assert.ok(ids.includes("Engine-confirmed"));
   const untracked = ts.DISPLAY_STATES.filter((s) => !s.tracked).map((s) => s.id);
   assert.deepEqual(untracked.sort(), ["independently_verified", "proposed"]);
 });
@@ -398,4 +428,44 @@ test("N3: every data and telemetry update is guarded; unmount cancels both", () 
   assert.match(hook, /Date\.now\(\) - lastAttempt\.current < FOCUS_REFRESH_MIN_MS/);
   assert.equal(layout.DATA_REFRESH_MS, 30_000);
   assert.equal(layout.FOCUS_REFRESH_MIN_MS, 5_000);
+});
+
+test("historical model tasks show the outcome message for their recorded code; the audit text is kept", () => {
+  // Evidence as recorded by 643c51c during the 2026-11-22 owner run.
+  const legacy = (event, detail) => [
+    { event: "task.created", actorId: 3, at: "t0", detail: {} },
+    { event: "task.approve", actorId: 2, at: "t1", detail: {} },
+    { event: "task.start", actorId: 1, at: "t2", detail: {} },
+    { event, actorId: 1, at: "t3", detail },
+  ];
+  const audit = legacy("task.succeed", {
+    operation: "load", engine: "ollama", model: "qwen2.5-coder:0.5b-base",
+    code: "OK", message: "Engine reachable; models listed.",
+    httpStatus: 200, durationMs: 1265, loadedBefore: [], loadedAfter: ["qwen2.5-coder:0.5b-base"],
+  });
+  const before = JSON.stringify(audit);
+  const o = ts.modelOutcome(audit);
+  assert.equal(o.message, "The engine confirmed the operation.");
+  assert.equal(o.recordedMessage, "Engine reachable; models listed.");
+  assert.equal(o.succeeded, true);
+  assert.equal(o.code, "OK");
+  assert.deepEqual(o.loadedAfter, ["qwen2.5-coder:0.5b-base"]);
+  assert.equal(JSON.stringify(audit), before, "the audit entries are not modified");
+  // Codes model control does not define keep their recorded message.
+  const failed = ts.modelOutcome(legacy("task.fail", { operation: "load", code: "HTTP_ERROR", message: "The engine answered with an HTTP error status.", httpStatus: 500 }));
+  assert.equal(failed.message, "The engine answered with an HTTP error status.");
+  assert.equal(failed.succeeded, false);
+  // Model-control codes always use the current wording.
+  assert.equal(ts.modelOutcome(legacy("task.fail", { operation: "unload", code: "STATE_MISMATCH", message: "old text" })).message,
+    ts.MODEL_OUTCOME_MESSAGES.STATE_MISMATCH);
+  assert.equal(ts.modelOutcome([{ event: "task.created", detail: {} }]), null);
+  // The inspector renders the derived message.
+  assert.match(app("ApprovalInspector.jsx"), /outcome\.message \? `: \$\{outcome\.message\}`/);
+});
+
+test("the inspector's model outcome messages match the server's model-control messages", () => {
+  const mc = require("../../server/utils/nytedesk/model-control.cjs");
+  for (const [code, text] of Object.entries(ts.MODEL_OUTCOME_MESSAGES)) {
+    assert.equal(mc.DIAGNOSTICS[code], text, code);
+  }
 });

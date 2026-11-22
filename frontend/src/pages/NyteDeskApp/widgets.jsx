@@ -325,7 +325,7 @@ export function ActivityPanel({ tasks, now }) {
                 </span>
               </span>
               <span className="flex items-center gap-2">
-                <StateBadge status={t.status} />
+                <StateBadge status={t.status} action={t.action} />
                 <span className={`${muted} truncate`}>
                   {describeAdapter(t.adapter).name}
                 </span>
