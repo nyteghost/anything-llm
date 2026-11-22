@@ -42,11 +42,41 @@ test("every backend state maps to its display state; nothing is upgraded", () =>
   assert.match(ts.displayState("mystery").label, /Unknown state \(mystery\)/);
 });
 
+test("a succeeded model load/unload is engine-confirmed; agent tasks stay agent-reported", () => {
+  for (const action of ["engine.model.load", "engine.model.unload"]) {
+    const s = ts.displayState("succeeded", action);
+    assert.equal(s.id, "engine_confirmed", action);
+    assert.equal(s.label, "Engine-confirmed");
+    assert.equal(s.tone, "success");
+    assert.notEqual(s.id, "independently_verified");
+    // Other states of a model task are unchanged.
+    assert.equal(ts.displayState("failed", action).label, "Failed");
+    assert.equal(ts.displayState("approved", action).label, "Approved");
+  }
+  for (const action of ["model.prompt", "vm.execute", undefined]) {
+    assert.equal(ts.displayState("succeeded", action).label, "Agent-reported complete", String(action));
+  }
+  const model = { requesterId: 3, adapter: "ollama", action: "engine.model.load", createdAt: "t0", status: "succeeded" };
+  const outcome = ts.provenance(model, []).find((l) => l.label === "Outcome").value;
+  assert.match(outcome, /^Confirmed by the engine/);
+  assert.match(outcome, /No agent was involved/);
+  assert.doesNotMatch(outcome, /Reported complete by the agent/);
+  // The task list says so too, and only agent tasks carry the unverified flag.
+  const sections = app("sections.jsx");
+  assert.match(sections, /MODEL_CONTROL_ACTIONS\.includes\(t\.action\)/);
+  assert.match(sections, /Confirmed against the engine&apos;s loaded models/);
+  for (const f of ["sections.jsx", "widgets.jsx", "ApprovalInspector.jsx"]) {
+    const src = app(f);
+    assert.doesNotMatch(src, /<StateBadge status=\{[^}]+\} \/>/, `${f}: StateBadge without action`);
+  }
+});
+
 test("the legend lists all eight requested states and marks untracked ones", () => {
   const ids = ts.DISPLAY_STATES.map((s) => s.label);
   for (const l of ["Proposed", "Awaiting approval", "Approved", "Queued", "Executing", "Agent-reported complete", "Independently verified", "Failed", "Cancelled"]) {
     assert.ok(ids.includes(l), l);
   }
+  assert.ok(ids.includes("Engine-confirmed"));
   const untracked = ts.DISPLAY_STATES.filter((s) => !s.tracked).map((s) => s.id);
   assert.deepEqual(untracked.sort(), ["independently_verified", "proposed"]);
 });

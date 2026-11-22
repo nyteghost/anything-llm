@@ -177,7 +177,7 @@ export default function ApprovalInspector({
       <BackLink to={backTo} />
       <div className="flex flex-wrap items-center gap-2">
         <h2 className="text-lg font-semibold">{info.label}</h2>
-        <StateBadge status={task.status} />
+        <StateBadge status={task.status} action={task.action} />
         <Badge
           tone={detail.protected ? "danger" : "warning"}
         >{`${risk.level} risk`}</Badge>

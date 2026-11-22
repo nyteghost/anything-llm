@@ -7,6 +7,7 @@ import {
   DISPLAY_STATES,
   describeAdapter,
   displayState,
+  MODEL_CONTROL_ACTIONS,
 } from "@/utils/nytedesk/taskState";
 import ChatPanel from "./ChatPanel";
 import { ResizableSplit } from "./Shell";
@@ -221,7 +222,7 @@ function TaskTable({ tasks, now, linkToInspector }) {
               className="border-t border-white/5 light:border-slate-100 align-top"
             >
               <td className="py-2 pr-3">
-                <StateBadge status={t.status} />
+                <StateBadge status={t.status} action={t.action} />
               </td>
               <td className="py-2 pr-3 max-w-[28rem]">
                 <Link
@@ -248,11 +249,16 @@ function TaskTable({ tasks, now, linkToInspector }) {
                     {`${t.approval.decision === "approve" ? "Approved" : "Rejected"} by user #${t.approval.by}`}
                   </span>
                 )}
-                {t.status === "succeeded" && (
-                  <span className="block text-amber-300">
-                    Not independently verified
-                  </span>
-                )}
+                {t.status === "succeeded" &&
+                  (MODEL_CONTROL_ACTIONS.includes(t.action) ? (
+                    <span className="block text-emerald-300 light:text-emerald-700">
+                      Confirmed against the engine&apos;s loaded models
+                    </span>
+                  ) : (
+                    <span className="block text-amber-300">
+                      Not independently verified
+                    </span>
+                  ))}
               </td>
               <td className={`py-2 text-xs ${muted}`}>
                 {timeAgo(t.updatedAt, now)}
@@ -270,7 +276,9 @@ export function TasksSection({ data }) {
   const tasks =
     filter === "all"
       ? data.tasks
-      : data.tasks.filter((t) => displayState(t.status).id === filter);
+      : data.tasks.filter(
+          (t) => displayState(t.status, t.action).id === filter
+        );
   return (
     <div className="pt-4 flex flex-col gap-4 max-w-6xl">
       <Card

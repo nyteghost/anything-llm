@@ -145,3 +145,33 @@ These steps use the same VM procedure as `NYTEDESK_OWNER_VERIFICATION.md` (tunne
 5. Click it. On the desktop, `curl -s http://127.0.0.1:11434/api/ps` lists the model, and VRAM rises. The inspector shows Outcome "Confirmed (OK)" with the before/after lists. The audit shows `task.start` and then `task.succeed`.
 6. Propose, approve and run `engine.model.unload` for the same model. `/api/ps` is empty again, and VRAM returns to the baseline.
 7. Check that Strata and PolyStrata cannot be targeted, and that the engine process route still refuses everything.
+
+## Owner verification at `643c51c` (owner run, 2026-11-22)
+The owner ran every step on the dedicated VM. The checkout was confirmed at `643c51cb42d83eaea642017555e40f0933ca0eb5` with `git rev-parse HEAD`, and the PR #7 database was migrated in place. Engine evidence comes from the desktop Ollama's own `[GIN]` request log, filtered by time window.
+
+**Users:**
+- `adminyte` #1, admin: runner;
+- `qa-manager` #2, manager: approver;
+- `qa-default` #3, default: requester;
+- `qa-default2`, default: wrong-role check.
+
+**Model:** `qwen2.5-coder:0.5b-base` (Q8_0, 717 MB VRAM).
+
+| Check | Result |
+|---|---|
+| Setting unset: proposal refused, inspector says off, run refused (403), no engine request | ✅ |
+| Not approved: run refused (409), no engine request | ✅ |
+| Requester runs own task: inspector reason, 403, no engine request | ✅ |
+| Default role: inspector reason, 403, no engine request | ✅ |
+| Load: `/api/ps` empty → model loaded (expires +30 min); VRAM 2253 → 3226 MiB; log `GET /api/tags` → `GET /api/ps` → **one** `POST /api/generate` (200, 1.26 s) → `GET /api/ps`; inspector Confirmed, before none / after model; audit created → approve → start → succeed, chain Verified | ✅ |
+| Unload: `/api/ps` model → empty; VRAM 3153 → 2268 MiB; **one** `POST /api/generate`; inspector and audit agree | ✅ |
+| Agent action (`model.prompt`, approved): run refused (403) | ✅ |
+| Process route `start`/`stop`/`restart`/`unload`/`kill`: 403 each | ✅ |
+| Strata and PolyStrata as model-control targets: refused (400), no task, no engine request | ✅ (live, see finding 3) |
+
+**Findings from the owner run, fixed in the next commit:**
+1. **Task list label.** A succeeded model task showed "Agent-reported complete / Not independently verified". It now shows **"Engine-confirmed"** in the badge, the filter and the legend. The list says "Confirmed against the engine's loaded models", and the provenance Outcome says "Confirmed by the engine… No agent was involved." Agent tasks are unchanged, and "Independently verified" stays untracked.
+2. **Outcome message.** The inspector showed "Engine reachable; models listed." for a confirmed load/unload, because the read-only check's messages overrode the model-control ones. Model-control messages now take precedence: the message is "The engine confirmed the operation."
+3. **Refusal reason for Strata and PolyStrata.** The live refusal said "The model must be listed by the engine's last successful check". The engine type is now checked first, so the refusal says "Model control is only supported for Ollama".
+
+**Not covered live:** behavior after a real crash or timeout, cancelling during preflight or in flight (covered by automated tests), accessibility, and a browser e2e for the new controls.

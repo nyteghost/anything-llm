@@ -161,7 +161,13 @@ test("proposals: model bound to the payload; Ollama only; must be listed; agents
   assert.notEqual(b.body.task.payloadHash, a.body.task.payloadHash);
   assert.equal((await propose(3, cp.ACTIONS.ENGINE_MODEL_LOAD, "not-listed:1b")).status, 400);
   assert.equal((await propose(3, cp.ACTIONS.ENGINE_MODEL_LOAD, "bad name;rm")).status, 400);
-  assert.equal((await propose(3, cp.ACTIONS.ENGINE_MODEL_LOAD, MODEL, { adapter: "strata" })).status, 400);
+  // Strata and PolyStrata are refused for the real reason, even though
+  // neither has a successful check listing the model.
+  for (const adapter of ["strata", "polystrata"]) {
+    const r = await propose(3, cp.ACTIONS.ENGINE_MODEL_LOAD, MODEL, { adapter });
+    assert.equal(r.status, 400, adapter);
+    assert.equal(r.body.error, "Model control is only supported for Ollama", adapter);
+  }
   assert.equal((await propose(3, cp.ACTIONS.ENGINE_MODEL_LOAD, undefined)).status, 400);
   assert.equal((await propose(3, cp.ACTIONS.MODEL_PROMPT, MODEL)).status, 400);
   const d = await detail(a.body.task);
@@ -205,6 +211,7 @@ test("approved load: fresh check, state read, one load, state verified, evidence
   const ev = d.audit[3].detail;
   assert.equal(ev.operation, "load");
   assert.equal(ev.code, "OK");
+  assert.equal(ev.message, "The engine confirmed the operation.");
   assert.deepEqual(ev.loadedBefore, []);
   assert.deepEqual(ev.loadedAfter, [MODEL]);
   assert.equal(d.audit[2].actorId, 1);
@@ -723,4 +730,12 @@ test("cancelling during preflight (before task.start) succeeds and the run then 
     s.close();
     fs.rmSync(tdir, { recursive: true, force: true });
   }
+});
+
+
+test("model-control messages are not overridden by the read-only check's messages", () => {
+  assert.equal(mc.DIAGNOSTICS.OK, "The engine confirmed the operation.");
+  assert.notEqual(mc.DIAGNOSTICS.OK, lam.DIAGNOSTICS.OK);
+  // The check's other codes are still described.
+  for (const code of Object.keys(lam.DIAGNOSTICS)) assert.ok(mc.DIAGNOSTICS[code], code);
 });

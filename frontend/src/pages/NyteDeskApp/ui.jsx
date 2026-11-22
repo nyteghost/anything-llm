@@ -33,8 +33,8 @@ export function Badge({ tone = "neutral", children, title }) {
   );
 }
 
-export function StateBadge({ status }) {
-  const s = displayState(status);
+export function StateBadge({ status, action }) {
+  const s = displayState(status, action);
   return (
     <Badge tone={s.tone} title={`Backend state: ${String(status)}`}>
       {s.label}

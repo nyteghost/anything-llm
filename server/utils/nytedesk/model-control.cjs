@@ -176,7 +176,11 @@ async function runModelOperation({ endpoint, model, operation }, options = {}) {
   };
 }
 
+// The read-only check's messages come first so the model-control messages
+// (above all OK) override them: a confirmed load/unload must not be described
+// as "Engine reachable; models listed".
 const DIAGNOSTICS = Object.freeze({
+  ...lam.DIAGNOSTICS,
   OK: "The engine confirmed the operation.",
   STATE_UNVERIFIED:
     "The engine answered, but its loaded-model list could not be read afterwards.",
@@ -184,7 +188,6 @@ const DIAGNOSTICS = Object.freeze({
     "The engine answered, but the loaded-model list does not show the expected change.",
   INTERNAL_ERROR:
     "NyteDesk could not complete the request; the engine's state is unknown. Check its loaded models.",
-  ...lam.DIAGNOSTICS,
 });
 
 module.exports = {

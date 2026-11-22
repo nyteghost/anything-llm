@@ -3,6 +3,9 @@
 // file maps its states to labels and never upgrades a state. In particular a
 // task the agent reports as finished is "Agent-reported complete", never
 // "verified", because no independent verification record exists yet.
+// A succeeded engine model load/unload is "Engine-confirmed": no agent was
+// involved, and NyteDesk read the engine's loaded-model list right after the
+// request and saw the change (recorded as task evidence).
 
 export const DISPLAY_STATES = Object.freeze([
   {
@@ -19,6 +22,12 @@ export const DISPLAY_STATES = Object.freeze([
     id: "agent_reported_complete",
     label: "Agent-reported complete",
     tracked: true,
+  },
+  {
+    id: "engine_confirmed",
+    label: "Engine-confirmed",
+    tracked: true,
+    note: "Model load/unload only: the engine's loaded-model list showed the change right after the request.",
   },
   {
     id: "independently_verified",
@@ -48,6 +57,7 @@ const TONE = Object.freeze({
   queued: "neutral",
   executing: "active",
   agent_reported_complete: "success",
+  engine_confirmed: "success",
   failed: "danger",
   rejected: "danger",
   cancelled: "neutral",
@@ -60,9 +70,16 @@ export const OPEN_BACKEND_STATES = Object.freeze([
   "running",
 ]);
 
-/** Display state for a backend status; unknown statuses are shown as such. */
-export function displayState(status) {
-  const id = BACKEND_TO_DISPLAY[status];
+/**
+ * Display state for a backend status; unknown statuses are shown as such.
+ * Pass the task's action so a succeeded model load/unload is shown as
+ * engine-confirmed rather than as an agent report.
+ */
+export function displayState(status, action) {
+  const id =
+    status === "succeeded" && MODEL_CONTROL_ACTIONS.includes(action)
+      ? "engine_confirmed"
+      : BACKEND_TO_DISPLAY[status];
   if (!id) {
     return {
       id: "unknown",
@@ -201,7 +218,9 @@ export function provenance(task, audit = []) {
   if (task.status === "succeeded") {
     lines.push({
       label: "Outcome",
-      value: "Reported complete by the agent. Not independently verified.",
+      value: MODEL_CONTROL_ACTIONS.includes(task.action)
+        ? "Confirmed by the engine: its loaded-model list showed the change right after the request. No agent was involved."
+        : "Reported complete by the agent. Not independently verified.",
     });
   }
   return lines;

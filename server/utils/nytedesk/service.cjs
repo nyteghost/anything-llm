@@ -449,6 +449,14 @@ function createService(store, options = {}) {
         if (!modelControlEnabled()) {
           throw new NyteDeskError(403, MODEL_CONTROL_DISABLED);
         }
+        // The engine type is decided first, so a refusal names the real
+        // reason rather than the missing model-list evidence.
+        if (!cp.ENGINE_CONTROL_ADAPTERS.includes(adapter)) {
+          throw new NyteDeskError(
+            400,
+            "Model control is only supported for Ollama"
+          );
+        }
         const check = store.engineChecks()[adapter];
         const listed =
           check &&
