@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { isMobile } from "react-device-detect";
+import { Link } from "react-router-dom";
 import Sidebar from "@/components/SettingsSidebar";
 import CTAButton from "@/components/lib/CTAButton";
 import useUser from "@/hooks/useUser";
@@ -31,7 +32,11 @@ const ACTIONS = [
   "credential.access",
   "privilege.change",
   "external.publish",
+  "engine.model.load",
+  "engine.model.unload",
 ];
+// Model control targets one model in a running Ollama.
+const MODEL_ACTIONS = ["engine.model.load", "engine.model.unload"];
 const STATUSES = [
   "",
   "waiting_approval",
@@ -53,7 +58,7 @@ const STATUS_STYLE = {
 };
 const TEXT = {
   intro:
-    "Supervised task control plane. Tasks are proposed, reviewed and audited here. Nothing is executed: model, VM and browser execution stay disabled until the owner's execution preconditions are verified.",
+    "Supervised task control plane. Tasks are proposed, reviewed and audited here. Agent, VM and browser execution stay disabled until the owner's execution preconditions are verified. The one exception is an approved model load/unload in Ollama, when the owner has turned model control on.",
   disabled:
     "NyteDesk is disabled. The server owner sets NYTEDESK_ENABLED=true to turn it on.",
   singleUser:
@@ -187,6 +192,12 @@ function Header() {
         NyteDesk
       </p>
       <p className={muted}>{TEXT.intro}</p>
+      <Link
+        to="/nytedesk"
+        className="self-start text-sm underline text-theme-text-primary"
+      >
+        Open the NyteDesk dashboard
+      </Link>
     </div>
   );
 }
@@ -299,16 +310,42 @@ const EMPTY_TASK = {
   adapter: "ollama",
   action: "model.prompt",
   description: "",
+  target: "",
 };
 
-function CreateTask({ workspaces, onCreated }) {
+export function CreateTask({ workspaces, onCreated }) {
   const [form, setForm] = useState(EMPTY_TASK);
   // One key per intended task: a retry after a network error re-sends the
   // same key, so the server returns the task it already created.
   const [key, setKey] = useState(() => NyteDesk.newIdempotencyKey());
   const [busy, setBusy] = useState(false);
+  // Models Ollama listed in its last successful check (model control only).
+  const [models, setModels] = useState(null);
+  const isModelAction = MODEL_ACTIONS.includes(form.action);
+  useEffect(() => {
+    if (!isModelAction) return;
+    let live = true;
+    NyteDesk.engines().then((r) => {
+      if (!live) return;
+      const ollama = r.ok
+        ? (r.data?.engines || []).find((e) => e.id === "ollama")
+        : null;
+      const check = ollama?.lastCheck;
+      setModels(check?.status === "external" ? check.models || [] : []);
+    });
+    return () => {
+      live = false;
+    };
+  }, [isModelAction]);
   const set = (k) => (e) => {
-    setForm({ ...form, [k]: e.target.value });
+    const next = { ...form, [k]: e.target.value };
+    if (k === "action" && MODEL_ACTIONS.includes(e.target.value)) {
+      next.adapter = "ollama";
+    }
+    if (k === "action" && !MODEL_ACTIONS.includes(e.target.value)) {
+      next.target = "";
+    }
+    setForm(next);
     setKey(NyteDesk.newIdempotencyKey());
   };
   const submit = async (e) => {
@@ -316,12 +353,16 @@ function CreateTask({ workspaces, onCreated }) {
     if (!form.slug || !form.description.trim()) {
       return showToast("Choose a workspace and describe the task", "error");
     }
+    if (isModelAction && !form.target) {
+      return showToast("Choose the model to load or unload", "error");
+    }
     setBusy(true);
     const body = {
       description: form.description,
       adapter: form.adapter,
       action: form.action,
     };
+    if (isModelAction) body.target = form.target;
     const r = await NyteDesk.createTask(form.slug, body, key);
     setBusy(false);
     if (!r.ok) return showToast(r.error, "error");
@@ -344,14 +385,29 @@ function CreateTask({ workspaces, onCreated }) {
           <Select
             value={form.adapter}
             onChange={set("adapter")}
-            options={ADAPTERS.map((a) => [a, a])}
+            options={(isModelAction ? ["ollama"] : ADAPTERS).map((a) => [a, a])}
           />
           <Select
             value={form.action}
             onChange={set("action")}
             options={ACTIONS.map((a) => [a, a])}
           />
+          {isModelAction && (
+            <Select
+              value={form.target}
+              onChange={set("target")}
+              options={(models || []).map((m) => [m, m])}
+              placeholder={models === null ? "Loading models…" : "Model…"}
+            />
+          )}
         </div>
+        {isModelAction && (
+          <p className="text-xs text-white/60 light:text-slate-600">
+            {models && models.length === 0
+              ? "No models listed: run a successful Ollama check in Local AI Manager first."
+              : "Needs NYTEDESK_MODEL_CONTROL=true on the server. After approval, a manager or administrator who is not the requester runs it from the approval inspector."}
+          </p>
+        )}
         <textarea
           className={`${input} min-h-[80px]`}
           maxLength={4000}

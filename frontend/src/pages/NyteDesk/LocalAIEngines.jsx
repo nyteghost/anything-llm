@@ -5,7 +5,7 @@ import showToast from "@/utils/toast";
 
 const TEXT = {
   description:
-    "Local inference engines NyteDesk can see. NyteDesk only reads each engine's model list over loopback HTTP. It never starts, stops, restarts, unloads or kills an engine: running engines are externally owned.",
+    "Local inference engines NyteDesk can see. NyteDesk reads each engine's model list over loopback HTTP. It never starts, stops, restarts or kills an engine: running engines are externally owned. Loading or unloading a model in Ollama is only possible through an approved task, when the owner has turned model control on.",
   polystrata:
     "PolyStrata's port can change between sessions; update the endpoint when it does.",
   strata: "Strata has no default endpoint; set its endpoint and API style.",
@@ -183,17 +183,17 @@ function EngineCard({ engine, selection, canCheck, isAdmin, onChanged }) {
       )}
       <div className="flex flex-wrap gap-2 pt-1">
         {canCheck && (
-          <CTAButton disabled={busy} onClick={runCheck}>
+          <CTAButton className="!mr-0" disabled={busy} onClick={runCheck}>
             {busy ? "Checking…" : "Check"}
           </CTAButton>
         )}
         {isAdmin && engine.selectable && !selected && (
-          <CTAButton disabled={busy} onClick={select}>
+          <CTAButton className="!mr-0" disabled={busy} onClick={select}>
             Select
           </CTAButton>
         )}
         {isAdmin && (
-          <CTAButton onClick={() => setEditing(!editing)}>
+          <CTAButton className="!mr-0" onClick={() => setEditing(!editing)}>
             {editing ? "Close" : "Configure"}
           </CTAButton>
         )}

@@ -59,6 +59,14 @@ const NyteDesk = {
     const body = { expectedVersion: task.version, reason: reason || null };
     return request("POST", taskPath(task, "cancel"), { body, key });
   },
+  // Runs an approved engine model load/unload task (NYTEDESK_MODEL_CONTROL).
+  // The server refuses every other action; the task version prevents a
+  // second run.
+  runModelTask: (task) => {
+    const body = { expectedVersion: task.version };
+    return request("POST", taskPath(task, "run"), { body });
+  },
+  telemetry: () => request("GET", "/nytedesk/telemetry"),
   engines: () => request("GET", "/nytedesk/engines"),
   saveEngine: (id, body, key) => {
     const path = `/nytedesk/engines/${encodeURIComponent(id)}`;

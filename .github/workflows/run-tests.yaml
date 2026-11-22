@@ -9,6 +9,7 @@ on:
     types: [opened, synchronize, reopened]
     paths:
       - "server/**.js"
+      - "server/**.cjs"
       - "collector/**.js"
 
 jobs:
