@@ -429,3 +429,43 @@ test("N3: every data and telemetry update is guarded; unmount cancels both", () 
   assert.equal(layout.DATA_REFRESH_MS, 30_000);
   assert.equal(layout.FOCUS_REFRESH_MIN_MS, 5_000);
 });
+
+test("historical model tasks show the outcome message for their recorded code; the audit text is kept", () => {
+  // Evidence as recorded by 643c51c during the 2026-11-22 owner run.
+  const legacy = (event, detail) => [
+    { event: "task.created", actorId: 3, at: "t0", detail: {} },
+    { event: "task.approve", actorId: 2, at: "t1", detail: {} },
+    { event: "task.start", actorId: 1, at: "t2", detail: {} },
+    { event, actorId: 1, at: "t3", detail },
+  ];
+  const audit = legacy("task.succeed", {
+    operation: "load", engine: "ollama", model: "qwen2.5-coder:0.5b-base",
+    code: "OK", message: "Engine reachable; models listed.",
+    httpStatus: 200, durationMs: 1265, loadedBefore: [], loadedAfter: ["qwen2.5-coder:0.5b-base"],
+  });
+  const before = JSON.stringify(audit);
+  const o = ts.modelOutcome(audit);
+  assert.equal(o.message, "The engine confirmed the operation.");
+  assert.equal(o.recordedMessage, "Engine reachable; models listed.");
+  assert.equal(o.succeeded, true);
+  assert.equal(o.code, "OK");
+  assert.deepEqual(o.loadedAfter, ["qwen2.5-coder:0.5b-base"]);
+  assert.equal(JSON.stringify(audit), before, "the audit entries are not modified");
+  // Codes model control does not define keep their recorded message.
+  const failed = ts.modelOutcome(legacy("task.fail", { operation: "load", code: "HTTP_ERROR", message: "The engine answered with an HTTP error status.", httpStatus: 500 }));
+  assert.equal(failed.message, "The engine answered with an HTTP error status.");
+  assert.equal(failed.succeeded, false);
+  // Model-control codes always use the current wording.
+  assert.equal(ts.modelOutcome(legacy("task.fail", { operation: "unload", code: "STATE_MISMATCH", message: "old text" })).message,
+    ts.MODEL_OUTCOME_MESSAGES.STATE_MISMATCH);
+  assert.equal(ts.modelOutcome([{ event: "task.created", detail: {} }]), null);
+  // The inspector renders the derived message.
+  assert.match(app("ApprovalInspector.jsx"), /outcome\.message \? `: \$\{outcome\.message\}`/);
+});
+
+test("the inspector's model outcome messages match the server's model-control messages", () => {
+  const mc = require("../../server/utils/nytedesk/model-control.cjs");
+  for (const [code, text] of Object.entries(ts.MODEL_OUTCOME_MESSAGES)) {
+    assert.equal(mc.DIAGNOSTICS[code], text, code);
+  }
+});

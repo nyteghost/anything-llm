@@ -159,14 +159,39 @@ export const MODEL_CONTROL_ACTIONS = Object.freeze([
   "engine.model.unload",
 ]);
 
-/** The recorded outcome evidence of a model control task, or null. */
+/**
+ * Messages for the outcome codes that only model control produces. They must
+ * match server/utils/nytedesk/model-control.cjs DIAGNOSTICS (a test checks).
+ * Tasks run before 0eda7a3 recorded the read-only check's wording for OK
+ * ("Engine reachable; models listed."); the inspector therefore derives the
+ * message from the recorded code, and the audit entry itself is untouched.
+ */
+export const MODEL_OUTCOME_MESSAGES = Object.freeze({
+  OK: "The engine confirmed the operation.",
+  STATE_UNVERIFIED:
+    "The engine answered, but its loaded-model list could not be read afterwards.",
+  STATE_MISMATCH:
+    "The engine answered, but the loaded-model list does not show the expected change.",
+  INTERNAL_ERROR:
+    "NyteDesk could not complete the request; the engine's state is unknown. Check its loaded models.",
+});
+
+/**
+ * The recorded outcome evidence of a model control task, or null.
+ * `message` is derived from the recorded `code` when model control defines
+ * it, otherwise the recorded message; `recordedMessage` is the audit text as
+ * stored.
+ */
 export function modelOutcome(audit = []) {
   const last = [...audit]
     .reverse()
     .find((e) => e.event === "task.succeed" || e.event === "task.fail");
   if (!last || !last.detail || !last.detail.operation) return null;
+  const recordedMessage = last.detail.message ?? null;
   return {
     ...last.detail,
+    message: MODEL_OUTCOME_MESSAGES[last.detail.code] ?? recordedMessage,
+    recordedMessage,
     succeeded: last.event === "task.succeed",
     at: last.at,
   };
